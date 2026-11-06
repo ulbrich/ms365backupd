@@ -2,6 +2,7 @@
 /bin/
 # Local test target
 /backup/
+/tmp/
 *.ms365partial
 .DS_Store
 # Claude Code local state (CLAUDE.md is tracked)
