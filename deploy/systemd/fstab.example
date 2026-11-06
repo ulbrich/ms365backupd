@@ -1,0 +1,12 @@
+# Mount the backup SSD by UUID (find it with: sudo blkid). "nofail" lets the Pi boot
+# without the disk; the daemon notices when the disk appears and starts a backup.
+#
+# ext4 (recommended; format with: sudo mkfs.ext4 -L m365backup /dev/sda1):
+UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  /mnt/backup  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10s  0  2
+#
+# exFAT (if the disk must also be readable on macOS/Windows):
+# UUID=XXXX-XXXX  /mnt/backup  exfat  defaults,noatime,nofail,uid=pi,gid=pi,umask=022,x-systemd.device-timeout=10s  0  0
+#
+# For hot-plugging without reboot, add x-systemd.automount to the options, or install
+# udisks2/usbmount. ms365backupd only writes when /mnt/backup is a real mount point
+# (require_mount), so an absent disk never fills the SD card.

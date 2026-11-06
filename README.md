@@ -1,0 +1,298 @@
+# MS365Backupd
+
+A small, robust daemon that backs up a Microsoft 365 account (OneDrive, SharePoint
+document libraries, Exchange mail, contacts and calendars) **incrementally** to an external
+USB disk.
+
+**Warning:** This sideproject was implemented mainly using AI tools. Use it with a bigger
+grain of salt than with other open source projects you're using.
+
+The tool is built with a Raspberry Pi in mind, but also runs on e.g. macOS. It is a
+single static Go binary with no runtime dependencies.
+
+- Writes only below `<target>/ms365backupd/`. Everything else on the disk is left alone.
+- Incremental backups use Microsoft Graph delta queries: only changes are fetched, renames
+  and moves are applied on disk instead of re-downloading, and deletions are kept in
+  `.deleted/<date>/`.
+- A newly connected disk is detected by an identity marker and automatically gets a full
+  backup. Reconnecting a known disk continues incrementally.
+- Sends an email for every failed daily backup (after retries), plus a weekly statistics report.
+- Configured from `~/.config/ms365backupd/config.json`. Every setting can be overridden by a flag.
+- Shell completion for bash, zsh and fish, and a TUI dashboard with a guided setup screen.
+
+## Why not an existing tool?
+
+| Project | Status |
+|---|---|
+| [Corso](https://github.com/alcionai/corso) (open source, M365 → local/S3) | Archived in Oct 2024, no longer maintained ([issue tracker](https://issues.ecosyste.ms/hosts/GitHub/repositories/alcionai%2Fcorso)) |
+| [CubeBackup for Microsoft 365](https://platform.softwareone.com/product/cubebackup-for-microsoft-365/PCP-1988-2481) | Commercial, server-oriented |
+| [CodeTwo Backup for Office 365](https://www.codetwo.com/freeware/backup-for-office-365-download/) | Windows only |
+| rclone (OneDrive backend) | Good for files, but no mail, contacts or calendar. A plain mirror has no deletion history or new-disk handling |
+
+rsync cannot talk to Microsoft 365, so this tool uses the Graph API directly. Graph's delta
+queries give the incremental behaviour that rsync would otherwise provide.
+
+## Disk layout
+
+```
+<target>/ms365backupd/
+  .ms365backupd/disk.json         disk identity (UUID, account) – do not delete
+  onedrive/…                      OneDrive, original folder structure and timestamps
+  sharepoint/<site>/<library>/…   optional SharePoint document libraries
+  mail/<folder>/<year>/<date>_<subject>_<id>.eml   one RFC 822 file per message (MIME)
+  contacts/<folder>/*.json + *.vcf
+  calendar/<calendar>/*.json      full Graph event objects (UTC)
+  .deleted/<YYYY-MM-DD>/…         items deleted/replaced in M365 (keep_deleted)
+```
+
+The sync state (delta tokens, item index) lives on the local machine in
+`~/.local/state/ms365backupd/disks/<disk-id>/`, one database per disk. A fresh disk therefore
+always starts from the beginning. Keeping the database off the disk also keeps it safe from
+exFAT and unplugging issues.
+
+## 1. Register an app in Entra ID (once)
+
+1. Go to <https://entra.microsoft.com> → *App registrations* → *New registration*.
+   Choose a name such as `ms365backupd` and *Accounts in this organizational directory only*
+   (single tenant). No redirect URI is needed.
+2. Under *Authentication* → *Advanced settings*, set **Allow public client flows** to **Yes**
+   and save. This is required for the device code login; without it the token request fails
+   (typically `AADSTS7000218` / `invalid_client`).
+3. Under *API permissions*, add Microsoft Graph **delegated** permissions:
+   `User.Read`, `offline_access`, `Files.Read.All`, `Mail.Read`, `Contacts.Read`, `Calendars.Read`.
+   Add `Mail.Send` if notifications are sent through the account itself
+   (`email.via = "graph"`). `Files.Read.All` also covers SharePoint, so `Sites.Read.All`
+   is not needed. Grant admin consent if your tenant requires it.
+4. On the app's *Overview* page copy the **Application (client) ID** and the
+   **Directory (tenant) ID**. Both are GUIDs; both are required. The tenant ID has no
+   default: the generic `common` endpoint does not work for single-tenant apps.
+
+## 2. Install
+
+Download a binary from the [releases](https://github.com/ulbrich/ms365backupd/releases)
+(`linux-arm64` for 64-bit Raspberry Pi OS, `linux-armv7` for 32-bit, `darwin-arm64` for
+Apple Silicon), or build it yourself:
+
+```sh
+make build-pi        # bin/ms365backupd-linux-arm64 (64-bit Raspberry Pi OS)
+make build-pi32      # bin/ms365backupd-linux-armv7
+scp bin/ms365backupd-linux-arm64 pi@raspberrypi:/tmp/ms365backupd
+ssh pi@raspberrypi 'sudo install -m755 /tmp/ms365backupd /usr/local/bin/'
+```
+
+Mount the SSD with `nofail` (see `deploy/systemd/fstab.example`). ext4 is recommended. exFAT
+works if the disk also has to be readable on a Mac.
+
+## 3. Configure
+
+The easiest way is the setup screen:
+
+```sh
+ms365backupd                 # first start without a config file opens the setup screen
+ms365backupd tui --setup     # later: or press s in the dashboard
+```
+
+It walks through Account → Disk → Data → Schedule → Email → Save, shows what is already
+configured (`default`, `● changed (was …)`), validates every field and checks the disk
+live. It writes `~/.config/ms365backupd/config.json` (mode 0600) only when you choose
+*save* (enter on the last step, or ctrl+s anywhere); esc discards. Settings without a field
+(`poll_interval`, `state_dir`, `log_file`, `graph_url`) are kept as they are. After saving,
+press **l** to sign in right in the TUI.
+
+Keys: tab/shift+tab or ↑/↓ move between fields, ←/→ or space change toggles and choices,
+pgdn/pgup (ctrl+n/ctrl+p) switch steps. In the exclude box enter adds a line and tab leaves it.
+
+Without the TUI:
+
+```sh
+ms365backupd config init --tenant-id <directory-tenant-id> --client-id <application-client-id> --target /mnt/backup
+$EDITOR ~/.config/ms365backupd/config.json
+ms365backupd config validate
+ms365backupd login           # shows a code; sign in on any device's browser
+ms365backupd test-email
+```
+
+### Sign-in and token renewal
+
+Microsoft 365 has no personal access tokens. `login` uses the OAuth 2.0 device code flow
+(delegated, as you). Entra ID returns a short-lived access token (~1 h) and a refresh token,
+both stored in `~/.config/ms365backupd/token.json` (mode 0600).
+
+- The access token is renewed automatically whenever it is needed. Entra ID rotates the
+  refresh token on use, and every new one is saved immediately.
+- The refresh token stays valid as long as it is used at least every ~90 days (sliding
+  window), so a daily backup never needs a new sign-in on its own.
+- A new sign-in is needed only when the refresh token is revoked: password change or reset,
+  "revoke sessions" by an admin, Conditional Access / sign-in frequency policies, or the app
+  registration being changed. The daemon then sends a failure mail right away (no retries),
+  and the TUI shows the problem. Press l (or run `ms365backupd login`); the running daemon
+  uses the new token on its next run, no restart needed.
+- Temporary errors while renewing (network down, Entra ID 5xx) are retried and do **not**
+  count as "login required".
+
+Example `config.json`:
+
+```json
+{
+  "tenant_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "client_id": "11111111-2222-3333-4444-555555555555",
+  "target": "/mnt/backup",
+  "require_mount": true,
+  "exclude": [
+    "onedrive/Videos",
+    "onedrive/Pictures/Camera Roll",
+    "**/node_modules",
+    "**/*.iso",
+    "mail/Junk Email",
+    "mail/Deleted Items"
+  ],
+  "services": { "onedrive": true, "mail": true, "contacts": true, "calendar": true },
+  "sharepoint_sites": ["*", "contoso.sharepoint.com:/sites/Archive"],
+  "schedule": "02:30",
+  "retry_attempts": 3,
+  "retry_delay": "20m",
+  "poll_interval": "30s",
+  "concurrency": 4,
+  "keep_deleted": true,
+  "min_free_mb": 1024,
+  "log_level": "info",
+  "email": {
+    "to": ["admin@example.com"],
+    "via": "smtp",
+    "from": "backup@example.com",
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 587,
+    "username": "backup@example.com",
+    "password_file": "~/.config/ms365backupd/smtp-password",
+    "tls": "starttls",
+    "weekly_report_day": "monday",
+    "weekly_report_time": "08:00"
+  }
+}
+```
+
+**Exclude patterns** are matched case-insensitively against paths relative to
+`<target>/ms365backupd`, and every parent path is checked, so `onedrive/Videos` excludes the whole
+folder. `**` and `*` globs are supported. A whole service can be excluded by its name, for
+example `mail`. Changing the list triggers a full re-check on the next run: newly included
+folders are fetched. Copies of newly excluded folders that are already on the disk are kept
+but no longer updated; delete them by hand if you want the space back.
+
+**SharePoint**: `sharepoint_sites` defaults to `["*"]`. `*` backs up the tenant's root site
+plus the site of every Microsoft 365 group (and therefore every Team) the account is a
+member of, with all their document libraries. Sites that do not belong to a group (classic
+team sites, communication sites) cannot be discovered with delegated `Files.Read.All`; add
+them explicitly as `host:/sites/Name` (a full URL works too; just `host` is the root site).
+Entries can be combined; a site found twice is backed up once. Exclude a single site with
+`sharepoint/<Site name>`, or set `"sharepoint_sites": []` to disable SharePoint. A missing or
+`null` value means `["*"]`. Sites are stored as `sharepoint/<site display name>/<library>/…`.
+
+**Email:** `via: "smtp"` uses any SMTP server. Credentials are only sent over TLS. `via: "graph"`
+sends through the backed-up mailbox and needs the `Mail.Send` permission. If no `email.to`
+is set, no mail is sent. Set `weekly_report_day` to `"off"` to disable the weekly report.
+
+**Flags** override the file, for example
+`ms365backupd backup --target /Volumes/SSD --require-mount=false -x 'onedrive/Big Stuff'`.
+`--exclude` adds to the configured list. `--email-to` and `--services` replace it.
+
+## 4. Run as a service
+
+```sh
+ms365backupd service install      # Pi: prints the sudo/systemctl steps; macOS: writes a LaunchAgent
+journalctl -u ms365backupd -f     # Pi logs
+```
+
+Changes to the config file are applied without a restart: the TUI setup tells the daemon
+automatically, otherwise run `sudo systemctl reload ms365backupd` (or `kill -HUP <pid>`). A
+running backup finishes with the old settings first. Changing `state_dir` needs a restart.
+
+The daemon:
+
+- checks the disk every `poll_interval`. Connecting a disk starts a backup, unless that disk
+  already had a successful backup in the last 20 hours.
+- runs the daily backup at `schedule`. A failed run is retried `retry_attempts` times, waiting
+  `retry_delay` × attempt between tries. Only then is a failure email sent, at most one per day.
+  A missing disk or an expired login is reported right away, because a retry would not help.
+- sends the weekly report on `weekly_report_day` at `weekly_report_time`. If the Pi was off at
+  that time, the report is sent as soon as it is back up.
+- uses a disk-safe write path: download to `*.ms365partial`, verify size and QuickXorHash,
+  fsync, then rename. Interrupted downloads resume, and stalled transfers are aborted.
+  Graph throttling (429 with Retry-After) is honoured.
+- never writes when the disk is unmounted (`require_mount`). It stops the run and reports a
+  failure when free space drops below `min_free_mb`.
+
+## Day-to-day commands
+
+```
+ms365backupd status            # daemon, disk, next run, last result
+ms365backupd tui               # dashboard: b=backup f=full resync c=cancel m=mail report s=setup l=sign in q=quit
+ms365backupd backup [--full] [-s mail,sharepoint]
+ms365backupd history -n 30
+ms365backupd report --print    # preview the weekly report
+ms365backupd completion zsh|bash|fish   # or: make install-completions
+```
+
+`backup` asks the running daemon to start a run. Without a daemon it runs in the foreground.
+Exit codes: 0 means success, 2 means partial (some items will be retried), 1 means failure.
+
+## Setup hints and troubleshooting
+
+Things that were not obvious during a real setup:
+
+- **Use the Directory (tenant) ID**, not `common` and not the client ID. `--tenant-id`,
+  the `tenant_id` key and the TUI's *Tenant ID* field all take the GUID from the app
+  registration's *Overview* page (the primary domain `contoso.onmicrosoft.com` works too).
+- **"Allow public client flows" must be Yes** (app registration → *Authentication*).
+  Otherwise the token request fails after you entered the code.
+- **Missing permissions**: `login` prints "these permissions were not granted: …". Add them
+  under *API permissions*, grant consent if needed, and sign in again (l in the TUI).
+- **The TUI showed "not logged in" right after a successful sign-in** in older builds; the
+  daemon now clears that as soon as the new token is saved. The run that failed before the
+  sign-in stays in the history as failed: press **b** to start a backup now.
+- **SharePoint empty?** Older configs had `"sharepoint_sites": null`, which meant "none".
+  It now means `*`. Sites that are not group/Teams sites must be listed explicitly. The
+  log line `sharepoint sites discovered` shows what `*` found.
+- **macOS volume names contain spaces**: use `"/Volumes/Extreme SSD"` in JSON, and quote it on
+  the command line (`--target "/Volumes/Extreme SSD"`).
+- **A different (or reformatted) disk gets a full backup.** This is intended; the sync state is
+  tracked per disk.
+- **After replacing the binary, restart the daemon** (`sudo systemctl restart ms365backupd`, or
+  `launchctl kickstart -k gui/$(id -u)/net.ulbrich.ms365backupd` on macOS). Config changes only
+  need a reload; a new binary needs a restart.
+- **Email via Graph** needs `Mail.Send` on the app *and* a new sign-in after adding it.
+  Check with `ms365backupd test-email`.
+
+## Restoring
+
+The files are plain files:
+
+- OneDrive and SharePoint: copy them back, or upload them through the web UI.
+- Mail: `.eml` files open in Outlook, Apple Mail or Thunderbird, and can be dragged back into a mailbox.
+  `ImportExportTools NG` for Thunderbird can bulk-import a folder.
+- Contacts: the `.vcf` files import into Outlook, iCloud and Google.
+- Calendar: the events are stored as the full Graph JSON objects.
+
+## Limitations
+
+- Not backed up: Teams chats, OneNote notebooks as live notebooks (their files under OneDrive
+  are backed up), Planner, the online archive mailbox, and attachments of calendar events.
+- Calendars are stored as JSON, not ICS.
+- Contacts and calendars are small, so they are re-read completely on every run. Mail and files are delta-based.
+- OneDrive's server-side version history is not backed up. Instead, when a file changes,
+  the previously backed-up copy is moved to `.deleted/<date>/` (with `keep_deleted`). Prune
+  that folder from time to time, for example with
+  `find /mnt/backup/ms365backupd/.deleted -mindepth 1 -maxdepth 1 -mtime +180 -exec rm -rf {} +`.
+
+## Development
+
+```sh
+make           # list all targets
+make test      # unit tests + an end-to-end test against a fake Graph server
+make check     # gofmt check, vet and tests, as CI runs them
+make dist      # all release binaries + SHA256SUMS in bin/
+```
+
+Work happens on `develop`; `main` holds what is released. To release, merge `develop` into
+`main`, push, and run `make release` on `main`. It tags the next `vx.y.z` (patch + 1, or
+`VERSION=1.2.3 make release`), pushes the tag and waits until GitHub Actions has published the
+release with the binaries. `make next-version` shows what the next tag would be.

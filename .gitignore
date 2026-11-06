@@ -1,0 +1,8 @@
+# Build output
+/bin/
+# Local test target
+/backup/
+*.ms365partial
+.DS_Store
+# Claude Code local state (CLAUDE.md is tracked)
+/.claude/

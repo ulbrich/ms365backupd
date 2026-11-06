@@ -1,0 +1,24 @@
+# /etc/systemd/system/ms365backupd.service
+# Adjust User= and the binary path, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ms365backupd
+# (`ms365backupd service install` generates this file with your paths.)
+[Unit]
+Description=Microsoft 365 backup daemon
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Environment=HOME=/home/pi
+ExecStart=/usr/local/bin/ms365backupd run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=30
+Nice=10
+IOSchedulingClass=idle
+TimeoutStopSec=60
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

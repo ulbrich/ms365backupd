@@ -1,0 +1,23 @@
+# Started by `make release` (script/release.sh), which pushes a vx.y.z tag.
+name: release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make check
+      - run: make dist APP_VSN=${GITHUB_REF_NAME#v}
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" bin/ms365backupd-* bin/SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
