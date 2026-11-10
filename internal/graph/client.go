@@ -93,6 +93,8 @@ type Client struct {
 	MaxRetries int
 	// StallTimeout aborts a download when no bytes arrive for this long.
 	StallTimeout time.Duration
+	// LoginCmd is suggested when the sign-in has to be renewed.
+	LoginCmd string
 }
 
 // New creates a client.
@@ -117,6 +119,7 @@ func New(base string, ts oauth2.TokenSource, log *slog.Logger) *Client {
 		log:          log,
 		MaxRetries:   8,
 		StallTimeout: 2 * time.Minute,
+		LoginCmd:     "ms365backupd login",
 	}
 }
 
@@ -199,7 +202,7 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method, u string, body
 		tok, err := c.ts.Token()
 		if err != nil {
 			if IsAuth(err) {
-				return nil, fmt.Errorf("auth: %w (run `ms365backupd login`)", err)
+				return nil, fmt.Errorf("auth: %w (run `%s`)", err, c.LoginCmd)
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()

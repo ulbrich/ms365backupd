@@ -100,6 +100,10 @@ type Config struct {
 	GraphURL string `json:"graph_url,omitempty"` // override for testing
 
 	Email Email `json:"email"`
+
+	// Mailboxes are additional mailboxes backed up on top of the account's own mail
+	// (to <target>/ms365backupd/mailboxes/<name>/).
+	Mailboxes []Mailbox `json:"mailboxes"`
 }
 
 // AllSites in sharepoint_sites selects every SharePoint site the account belongs to.
@@ -176,6 +180,9 @@ func Load(path string, mustExist bool) (*Config, error) {
 	if cfg.Email.To == nil {
 		cfg.Email.To = []string{}
 	}
+	if cfg.Mailboxes == nil {
+		cfg.Mailboxes = []Mailbox{}
+	}
 	return cfg, nil
 }
 
@@ -195,6 +202,9 @@ func (c *Config) Save(path string) error {
 	if cp.Email.To == nil {
 		cp.Email.To = []string{}
 	}
+	if cp.Mailboxes == nil {
+		cp.Mailboxes = []Mailbox{}
+	}
 	b, err := json.MarshalIndent(&cp, "", "  ")
 	if err != nil {
 		return err
@@ -211,6 +221,13 @@ func (c *Config) Redacted() *Config {
 	cp := *c
 	if cp.Email.Password != "" {
 		cp.Email.Password = "********"
+	}
+	cp.Mailboxes = make([]Mailbox, len(c.Mailboxes))
+	for i, m := range c.Mailboxes {
+		if m.Password != "" {
+			m.Password = "********"
+		}
+		cp.Mailboxes[i] = m
 	}
 	return &cp
 }
@@ -332,8 +349,24 @@ func (c *Config) Validate(needAccount bool) error {
 	default:
 		errs = append(errs, "log_level must be debug|info|warn|error")
 	}
-	if !c.Services.OneDrive && !c.Services.Mail && !c.Services.Contacts && !c.Services.Calendar && len(c.SharePointSites) == 0 {
+	if !c.Services.OneDrive && !c.Services.Mail && !c.Services.Contacts && !c.Services.Calendar && len(c.SharePointSites) == 0 &&
+		len(c.ActiveMailboxes()) == 0 {
 		errs = append(errs, "no services enabled")
+	}
+	seen := map[string]bool{}
+	for i, m := range c.Mailboxes {
+		what := fmt.Sprintf("mailboxes[%d]", i)
+		if m.Name != "" {
+			what = fmt.Sprintf("mailboxes[%q]", m.Name)
+		}
+		if err := m.Validate(); err != nil {
+			errs = append(errs, what+": "+err.Error())
+		}
+		if k := strings.ToLower(m.Name); seen[k] {
+			errs = append(errs, what+": duplicate name")
+		} else {
+			seen[k] = true
+		}
 	}
 	if c.EmailEnabled() {
 		switch c.EmailVia() {

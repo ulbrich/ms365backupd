@@ -98,7 +98,7 @@ with command line flags.`,
 
 	root.AddCommand(
 		newLoginCmd(), newLogoutCmd(), newRunCmd(version), newBackupCmd(), newStatusCmd(), newTUICmd(),
-		newHistoryCmd(), newReportCmd(), newTestEmailCmd(), newConfigCmd(), newVersionCmd(version), newServiceCmd(),
+		newHistoryCmd(), newReportCmd(), newTestEmailCmd(), newConfigCmd(), newVersionCmd(version), newServiceCmd(), newMailboxCmd(),
 	)
 	return root
 }

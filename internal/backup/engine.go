@@ -9,6 +9,7 @@
 //	  mail/<folder>/<year>/*.eml      one RFC 822 file per message
 //	  contacts/<folder>/*.json|.vcf
 //	  calendar/<calendar>/*.json
+//	  mailboxes/<name>/<folder>/<year>/*.eml  additional mailboxes (Graph or IMAP)
 //	  .deleted/<date>/...             items deleted in Microsoft 365 (keep_deleted)
 package backup
 
@@ -41,10 +42,11 @@ const (
 	SvcMail       = "mail"
 	SvcContacts   = "contacts"
 	SvcCalendar   = "calendar"
+	SvcMailboxes  = "mailboxes"
 )
 
 // AllServices in execution order.
-var AllServices = []string{SvcOneDrive, SvcSharePoint, SvcMail, SvcContacts, SvcCalendar}
+var AllServices = []string{SvcOneDrive, SvcSharePoint, SvcMail, SvcContacts, SvcCalendar, SvcMailboxes}
 
 // Options configure one run.
 type Options struct {
@@ -57,6 +59,8 @@ type Options struct {
 	Only []string
 	// FullResync ignores stored delta tokens (re-verifies everything; existing files are not re-downloaded).
 	FullResync bool
+	// MailboxGraph overrides how Graph clients for additional mailboxes are made (tests).
+	MailboxGraph func(context.Context, *config.Mailbox) (*graph.Client, error)
 }
 
 // Engine runs a backup. Create with New, then call Run once.
@@ -225,6 +229,8 @@ func (e *Engine) enabled(svc string) bool {
 		return e.cfg.Services.Contacts
 	case SvcCalendar:
 		return e.cfg.Services.Calendar
+	case SvcMailboxes:
+		return len(e.cfg.ActiveMailboxes()) > 0
 	}
 	return false
 }
@@ -292,6 +298,7 @@ func (e *Engine) run(ctx context.Context, res *status.RunResult) error {
 		{SvcMail, e.backupMail},
 		{SvcContacts, e.backupContacts},
 		{SvcCalendar, e.backupCalendar},
+		{SvcMailboxes, e.backupMailboxes},
 	}
 	var failed []string
 	for _, s := range steps {

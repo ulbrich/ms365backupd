@@ -26,7 +26,8 @@ const (
 	kSecret
 	kBool
 	kChoice
-	kLines // multi-line list, one entry per line
+	kLines     // multi-line list, one entry per line
+	kMailboxes // list of additional mailboxes (own editor, value is JSON)
 )
 
 type field struct {
@@ -41,6 +42,7 @@ type field struct {
 	get         func(*config.Config) string
 	set         func(*config.Config, string) error
 	show        func(*setup) bool
+	mb          *mbEditor
 }
 
 func (f *field) value() string {
@@ -51,6 +53,8 @@ func (f *field) value() string {
 		return f.choices[f.ci]
 	case kLines:
 		return strings.Join(splitList(f.area.Value(), "\n"), "\n")
+	case kMailboxes:
+		return mailboxesJSON(f.mb.list)
 	default:
 		return strings.TrimSpace(f.in.Value())
 	}
@@ -69,6 +73,8 @@ func (f *field) setValue(v string) {
 		}
 	case kLines:
 		f.area.SetValue(v)
+	case kMailboxes:
+		f.mb.list = parseMailboxes(v)
 	default:
 		f.in.SetValue(v)
 	}
@@ -98,6 +104,15 @@ func (f *field) display(v string) string {
 	switch {
 	case f.kind == kSecret && v != "":
 		return "••••••"
+	case f.kind == kMailboxes:
+		var names []string
+		for _, m := range parseMailboxes(v) {
+			names = append(names, m.Name)
+		}
+		if len(names) == 0 {
+			return "(none)"
+		}
+		return strings.Join(names, ", ")
 	case v == "":
 		return "(empty)"
 	case f.kind == kLines:
@@ -133,6 +148,9 @@ type setup struct {
 
 	accountKey, accountText string
 	inputWidth              int
+
+	// loginReq asks the parent to sign in an additional Graph mailbox.
+	loginReq *config.Mailbox
 }
 
 func newSetup(path string, base *config.Config, firstRun bool, width int) *setup {
@@ -158,6 +176,8 @@ func newSetup(path string, base *config.Config, firstRun bool, width int) *setup
 				f.area.Prompt = "│ "
 				f.area.SetHeight(5)
 				f.area.CharLimit = 0
+			case kMailboxes:
+				f.mb = &mbEditor{notes: map[string]string{}, testing: map[string]bool{}}
 			}
 			f.setValue(f.orig)
 		}
@@ -235,6 +255,7 @@ func (s *setup) build() (*config.Config, map[*field]error) {
 	cp.Exclude = append([]string(nil), s.base.Exclude...)
 	cp.SharePointSites = append([]string(nil), s.base.SharePointSites...)
 	cp.Email.To = append([]string(nil), s.base.Email.To...)
+	cp.Mailboxes = append([]config.Mailbox(nil), s.base.Mailboxes...)
 	errs := map[*field]error{}
 	for _, st := range s.steps {
 		for _, f := range st.fields {
@@ -289,6 +310,28 @@ func (s *setup) cancel() {
 	s.done = true
 }
 
+// mailboxEditor returns the mailbox list editor.
+func (s *setup) mailboxEditor() *mbEditor {
+	for _, st := range s.steps {
+		for _, f := range st.fields {
+			if f.kind == kMailboxes {
+				return f.mb
+			}
+		}
+	}
+	return nil
+}
+
+// gotoStep shows the step with the given title.
+func (s *setup) gotoStep(title string) tea.Cmd {
+	for i, st := range s.steps {
+		if st.title == title {
+			s.cur, s.foc = i, 0
+		}
+	}
+	return s.focusCurrent()
+}
+
 func (s *setup) save(force bool) {
 	cfg, errs := s.build()
 	if len(errs) > 0 {
@@ -305,17 +348,35 @@ func (s *setup) save(force bool) {
 		s.flash = "saving failed: " + err.Error()
 		return
 	}
+	// Removed Graph mailboxes no longer need their sign-in.
+	for i := range s.base.Mailboxes {
+		old := &s.base.Mailboxes[i]
+		if old.Type == config.MailboxGraph && cfg.FindMailbox(old.Name) < 0 {
+			_ = auth.ForMailbox(s.base, old).Logout()
+		}
+	}
 	s.done, s.saved, s.savedCfg = true, true, cfg
 }
 
 // Update handles a key; the parent checks s.done afterwards.
 func (s *setup) Update(msg tea.Msg) tea.Cmd {
+	if tm, ok := msg.(mbTestMsg); ok {
+		if e := s.mailboxEditor(); e != nil {
+			e.testDone(tm)
+		}
+		return nil
+	}
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return s.passThrough(msg)
 	}
 	k := km.String()
 	s.flash = ""
+	if v := s.visible(); s.confirm == "" && len(v) > 0 && v[s.foc].kind == kMailboxes {
+		if cmd, handled := s.updateMailboxes(v[s.foc].mb, km); handled {
+			return cmd
+		}
+	}
 	if s.confirm != "" {
 		c := s.confirm
 		s.confirm = ""
@@ -456,7 +517,7 @@ func (s *setup) View() string {
 		for i, f := range v {
 			body.WriteString(s.fieldView(f, i == s.foc, errs[f]) + "\n")
 		}
-		if f := v[s.foc]; f.help != "" {
+		if f := v[s.foc]; f.help != "" && (f.mb == nil || f.mb.form == nil) {
 			body.WriteString("\n" + sDim.Render(wrap(f.help, w-8)) + "\n")
 		}
 	}
@@ -506,6 +567,14 @@ func (s *setup) fieldView(f *field, focused bool, err error) string {
 		} else {
 			val = f.choices[f.ci]
 		}
+	case kMailboxes:
+		if focused {
+			val = "\n\n" + s.mailboxesView(f.mb, s.width)
+		} else if len(f.mb.list) == 0 {
+			val = sDim.Render("(none)")
+		} else {
+			val = truncate(f.display(f.value()), max(20, s.width-40)) + sDim.Render(fmt.Sprintf("  (%d)", len(f.mb.list)))
+		}
 	case kLines:
 		if focused {
 			val = "\n" + f.area.View()
@@ -525,7 +594,7 @@ func (s *setup) fieldView(f *field, focused bool, err error) string {
 			val = f.in.View()
 		}
 	}
-	if f.kind != kLines || !focused {
+	if f.kind != kLines && f.kind != kMailboxes || !focused {
 		val += strings.Repeat(" ", max(0, s.inputWidth+2-lipgloss.Width(val)))
 	}
 	var mark string
@@ -542,6 +611,9 @@ func (s *setup) fieldView(f *field, focused bool, err error) string {
 		}
 	case cur == f.def && cur != "":
 		mark = sDim.Render("  default")
+	}
+	if f.kind == kMailboxes && focused {
+		return cursor + label + strings.TrimSpace(mark) + val
 	}
 	return cursor + label + val + mark
 }
@@ -667,6 +739,12 @@ func buildSteps() []step {
 					func(c *config.Config) []string { return c.Exclude },
 					func(c *config.Config, v []string) { c.Exclude = v }),
 			},
+		},
+		{
+			title: mailboxesStep,
+			intro: "Additional mailboxes, backed up next to the account's own mail (service \"mailboxes\"). " +
+				"Changes are written when you save the setup.",
+			fields: []*field{mailboxesField()},
 		},
 		{
 			title: "Schedule",

@@ -153,7 +153,7 @@ func newBackupCmd() *cobra.Command {
 			return runForeground(cfg, only, full)
 		},
 	}
-	cmd.Flags().StringSliceVarP(&only, "service", "s", nil, "only these services (onedrive,sharepoint,mail,contacts,calendar)")
+	cmd.Flags().StringSliceVarP(&only, "service", "s", nil, "only these services (onedrive,sharepoint,mail,contacts,calendar,mailboxes)")
 	cmd.Flags().BoolVar(&full, "full", false, "full resync: re-check every item (existing files are not downloaded again)")
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "never delegate to the daemon")
 	_ = cmd.RegisterFlagCompletionFunc("service", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {

@@ -85,6 +85,9 @@ type model struct {
 	login       *auth.DeviceLogin
 	loginErr    error
 	loginCancel context.CancelFunc
+	loginA      *auth.Authenticator
+	loginTitle  string
+	loginMbx    string // name of the mailbox being signed in (from setup); "" = main account
 }
 
 type loginStartedMsg struct {
@@ -179,9 +182,15 @@ func (m model) startLogin() (tea.Model, tea.Cmd) {
 		m.setFlash("set the client ID first (press s for setup)")
 		return m, nil
 	}
+	return m.startLoginFor(auth.New(m.cfg), "Sign in to Microsoft 365", "")
+}
+
+// startLoginFor runs the device code flow for a (main account or, with mailbox set,
+// an additional mailbox).
+func (m model) startLoginFor(a *auth.Authenticator, title, mailbox string) (tea.Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.mode, m.login, m.loginErr, m.loginCancel = modeLogin, nil, nil, cancel
-	a := auth.New(m.cfg)
+	m.loginA, m.loginTitle, m.loginMbx = a, title, mailbox
 	return m, func() tea.Msg {
 		dl, err := a.StartLogin(ctx)
 		return loginStartedMsg{dl, err}
@@ -197,7 +206,7 @@ func waitLogin(ctx context.Context, dl *auth.DeviceLogin) tea.Cmd {
 
 func (m model) loginView() string {
 	var b strings.Builder
-	b.WriteString(sTitle.Render("Sign in to Microsoft 365") + "\n\n")
+	b.WriteString(sTitle.Render(m.loginTitle) + "\n\n")
 	var body string
 	switch {
 	case m.loginErr != nil:
@@ -209,7 +218,7 @@ func (m model) loginView() string {
 		body = "1. Open  " + sTitle.Render(m.login.URI) + "  in a browser on any device\n" +
 			"2. Enter the code  " + lipgloss.NewStyle().Bold(true).Foreground(cOK).Render(m.login.Code) + "\n" +
 			"3. Sign in with the account to back up and accept the permissions\n\n" +
-			sDim.Render("Requested: "+strings.Join(m.cfg.Scopes(), " ")) + "\n" +
+			sDim.Render("Requested: "+strings.Join(m.loginA.Scopes(), " ")) + "\n" +
 			sWarn.Render("● waiting for sign-in") + sDim.Render(" — code expires in "+until(m.login.Expiry))
 	}
 	b.WriteString(sBox.Width(max(60, m.width)-2).Render(body) + "\n\n")
@@ -290,7 +299,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.loginCancel()
-		m.mode, m.login = modeDashboard, nil
+		m.login = nil
+		if m.loginMbx != "" {
+			m.mode = modeSetup
+			if e := m.setup.mailboxEditor(); e != nil {
+				e.notes[m.loginMbx] = sOK.Render("✓ signed in as " + msg.account)
+			}
+			return m, nil
+		}
+		m.mode = modeDashboard
 		m.setFlash("Signed in as " + msg.account + ". Press b to start a backup.")
 		return m, tea.Batch(m.fetch(), m.reloadDaemon("Signed in as "+msg.account+". Press b to start a backup."))
 	}
@@ -301,6 +318,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.setup.done {
 			return m.setupFinished()
 		}
+		if mb := m.setup.loginReq; mb != nil {
+			m.setup.loginReq = nil
+			cfg, _ := m.setup.build()
+			return m.startLoginFor(auth.ForMailbox(cfg, mb), "Sign in mailbox "+mb.Name, mb.Name)
+		}
 		return m, cmd
 	case modeLogin:
 		if km, ok := msg.(tea.KeyMsg); ok {
@@ -308,6 +330,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "q", "ctrl+c":
 				m.loginCancel()
 				m.mode, m.login, m.loginErr = modeDashboard, nil, nil
+				if m.loginMbx != "" {
+					m.mode = modeSetup
+				}
 				m.setFlash("sign-in cancelled")
 			}
 		}
@@ -356,6 +381,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setup.focusCurrent()
 		case "l":
 			return m.startLogin()
+		case "a":
+			if err := m.openSetup(); err != nil {
+				m.setFlash("cannot open setup: " + err.Error())
+				return m, nil
+			}
+			return m, m.setup.gotoStep(mailboxesStep)
 		}
 	}
 	return m, nil
@@ -407,7 +438,7 @@ func (m model) View() string {
 	} else {
 		b.WriteString("\n")
 	}
-	keys := []string{"b backup now", "f full resync", "c cancel run", "m send weekly report", "s setup", "l sign in", "r refresh", "q quit"}
+	keys := []string{"b backup now", "f full resync", "c cancel run", "m send weekly report", "s setup", "l sign in", "a mailboxes", "r refresh", "q quit"}
 	b.WriteString(sDim.Render(strings.Join(keys, " · ")))
 	return b.String()
 }

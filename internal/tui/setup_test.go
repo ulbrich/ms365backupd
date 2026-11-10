@@ -152,6 +152,7 @@ func TestSetupKeepsExistingConfig(t *testing.T) {
 	base.Email.To = []string{"a@example.com", "b@example.com"}
 	base.Email.SMTPHost = "smtp.example.com"
 	base.Email.From = "backup@example.com"
+	base.Mailboxes = []config.Mailbox{{Name: "gmx", Type: config.MailboxIMAP, Host: "imap.gmx.net", Username: "u", Password: "p"}}
 	if err := base.Save(path); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,8 @@ func TestSetupKeepsExistingConfig(t *testing.T) {
 		t.Fatalf("not saved: %q %q", s.confirm, s.flash)
 	}
 	got, _ := config.Load(path, true)
-	if got.RequireMount || got.PollInterval.Duration != 45*time.Second || got.GraphURL != "http://example.invalid" || len(got.Email.To) != 2 {
+	if got.RequireMount || got.PollInterval.Duration != 45*time.Second || got.GraphURL != "http://example.invalid" || len(got.Email.To) != 2 ||
+		len(got.Mailboxes) != 1 || got.Mailboxes[0].Password != "p" {
 		t.Fatalf("unexpected result: %+v", got)
 	}
 }
@@ -189,9 +191,7 @@ func TestSetupKeepsExistingConfig(t *testing.T) {
 func TestSetupSMTPFieldsOnlyForSMTP(t *testing.T) {
 	path := testEnv(t)
 	s := newSetup(path, config.Default(), true, 100)
-	for i := 0; i < 4; i++ {
-		s.Update(key("pgdown"))
-	}
+	s.gotoStep("Email")
 	n := len(s.visible())
 	via := s.value("Send via")
 	s.Update(key("tab"))   // -> Send via

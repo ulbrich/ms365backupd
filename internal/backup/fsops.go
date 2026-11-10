@@ -150,7 +150,7 @@ var errHashMismatch = errors.New("content hash mismatch after download")
 
 // download fetches url into rel atomically. Partial downloads from interrupted
 // runs are resumed. If wantQuickXor is set the content is verified.
-func (e *Engine) download(ctx context.Context, url, rel string, wantSize int64, mtime time.Time, wantQuickXor string, hdr ...graph.Option) (int64, error) {
+func (e *Engine) download(ctx context.Context, g *graph.Client, url, rel string, wantSize int64, mtime time.Time, wantQuickXor string, hdr ...graph.Option) (int64, error) {
 	if err := e.checkFree(); err != nil {
 		return 0, err
 	}
@@ -167,7 +167,7 @@ func (e *Engine) download(ctx context.Context, url, rel string, wantSize int64, 
 	if st, err := f.Stat(); err == nil && wantSize > 0 && st.Size() > 0 && st.Size() < wantSize {
 		offset = st.Size()
 	}
-	n, err := e.g.Download(ctx, url, f, offset, hdr...)
+	n, err := g.Download(ctx, url, f, offset, hdr...)
 	if err != nil {
 		f.Close()
 		var de *graph.DiskError

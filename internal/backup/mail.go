@@ -33,12 +33,27 @@ type mailMessage struct {
 // Immutable ids stay stable when messages move between folders.
 var mailPrefer = graph.WithHeader("Prefer", `IdType="ImmutableId", odata.maxpagesize=200`)
 
-func (e *Engine) listMailFolders(ctx context.Context) ([]mailFolder, error) {
+// mailSource is one Graph mailbox: the account's own (service mail) or an
+// additional mailbox with its own sign-in.
+type mailSource struct {
+	g    *graph.Client
+	dir  string // backup-relative root, e.g. "mail" or "mailboxes/work"
+	coll string // state collection prefix, e.g. "mail:"
+	svc  string // counters and progress
+}
+
+func (e *Engine) ownMail() mailSource {
+	return mailSource{g: e.g, dir: SvcMail, coll: "mail:", svc: SvcMail}
+}
+
+func (e *Engine) backupMail(ctx context.Context) error { return e.backupGraphMail(ctx, e.ownMail()) }
+
+func (e *Engine) listMailFolders(ctx context.Context, src mailSource) ([]mailFolder, error) {
 	var out []mailFolder
 	var walk func(u, parent string, depth int) error
 	walk = func(u, parent string, depth int) error {
 		var level []mailFolder
-		_, err := graph.Iterate(ctx, e.g, u, func(v []mailFolder) error {
+		_, err := graph.Iterate(ctx, src.g, u, func(v []mailFolder) error {
 			level = append(level, v...)
 			return nil
 		}, mailPrefer)
@@ -57,26 +72,26 @@ func (e *Engine) listMailFolders(ctx context.Context) ([]mailFolder, error) {
 		}
 		return nil
 	}
-	err := walk("me/mailFolders?$top=100&$select=id,displayName,childFolderCount", SvcMail, 0)
+	err := walk("me/mailFolders?$top=100&$select=id,displayName,childFolderCount", src.dir, 0)
 	return out, err
 }
 
-func (e *Engine) backupMail(ctx context.Context) error {
-	e.setPhase(SvcMail, "listing folders")
-	folders, err := e.listMailFolders(ctx)
+func (e *Engine) backupGraphMail(ctx context.Context, src mailSource) error {
+	e.setPhase(src.svc, "listing folders of "+src.dir)
+	folders, err := e.listMailFolders(ctx, src)
 	if err != nil {
 		return fmt.Errorf("list mail folders: %w", err)
 	}
 	live := map[string]bool{}
 	var errs []string
 	for _, f := range folders {
-		coll := "mail:" + f.ID
+		coll := src.coll + f.ID
 		live[coll] = true
 		if e.ex.Excluded(f.path) {
 			e.log.Debug("mail folder excluded", "folder", f.path)
 			continue
 		}
-		if err := e.syncMailFolder(ctx, f); err != nil {
+		if err := e.syncMailFolder(ctx, src, f); err != nil {
 			if isFatal(err) {
 				return err
 			}
@@ -84,8 +99,19 @@ func (e *Engine) backupMail(ctx context.Context) error {
 			e.sample(fmt.Sprintf("mail folder %s: %v", f.path, err))
 		}
 	}
-	// Folders deleted in the mailbox.
-	colls, err := e.st.Collections("mail:")
+	if err := e.retireFolders(src.coll, live); err != nil {
+		return err
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%d folder(s) failed: %s", len(errs), strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// retireFolders removes the backup of mail folders (collections with prefix) that
+// no longer exist in the mailbox.
+func (e *Engine) retireFolders(prefix string, live map[string]bool) error {
+	colls, err := e.st.Collections(prefix)
 	if err != nil {
 		return err
 	}
@@ -102,9 +128,6 @@ func (e *Engine) backupMail(ctx context.Context) error {
 		}
 		_ = e.st.DropCollection(coll)
 		_ = e.st.SetDelta(coll, "")
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("%d folder(s) failed: %s", len(errs), strings.Join(errs, "; "))
 	}
 	return nil
 }
@@ -126,14 +149,12 @@ func messageRel(folder string, m mailMessage) string {
 	return joinRel(folder, t.Format("2006"), name)
 }
 
-func (e *Engine) syncMailFolder(ctx context.Context, f mailFolder) error {
-	coll := "mail:" + f.ID
-	e.setPhase(SvcMail, "listing "+f.path)
-
-	// Folder renamed/moved: move its directory.
+// relocateFolder moves the directory of a renamed/moved mail folder and updates
+// the stored paths of its messages.
+func (e *Engine) relocateFolder(coll, path string) error {
 	pathKey := "path:" + coll
-	if old := e.st.Meta(pathKey); old != "" && old != f.path {
-		if _, err := e.move(old, f.path); err != nil {
+	if old := e.st.Meta(pathKey); old != "" && old != path {
+		if _, err := e.move(old, path); err != nil {
 			return err
 		}
 		items, err := e.st.All(coll)
@@ -142,7 +163,7 @@ func (e *Engine) syncMailFolder(ctx context.Context, f mailFolder) error {
 		}
 		for id, it := range items {
 			if isUnder(it.Path, old) {
-				it.Path = f.path + strings.TrimPrefix(it.Path, old)
+				it.Path = path + strings.TrimPrefix(it.Path, old)
 				items[id] = it
 			}
 		}
@@ -150,7 +171,18 @@ func (e *Engine) syncMailFolder(ctx context.Context, f mailFolder) error {
 			return err
 		}
 	}
-	_ = e.st.SetMeta(pathKey, f.path)
+	return e.st.SetMeta(pathKey, path)
+}
+
+func (e *Engine) syncMailFolder(ctx context.Context, src mailSource, f mailFolder) error {
+	coll := src.coll + f.ID
+	svc := src.svc
+	e.setPhase(svc, "listing "+f.path)
+
+	// Folder renamed/moved: move its directory.
+	if err := e.relocateFolder(coll, f.path); err != nil {
+		return err
+	}
 
 	initial := fmt.Sprintf("me/mailFolders/%s/messages/delta?$select=id,subject,receivedDateTime,lastModifiedDateTime", url.PathEscape(f.ID))
 	link := e.st.Delta(coll)
@@ -160,7 +192,7 @@ func (e *Engine) syncMailFolder(ctx context.Context, f mailFolder) error {
 	}
 	fetch := func(u string) ([]mailMessage, string, error) {
 		var all []mailMessage
-		dl, err := graph.Iterate(ctx, e.g, u, func(v []mailMessage) error {
+		dl, err := graph.Iterate(ctx, src.g, u, func(v []mailMessage) error {
 			all = append(all, v...)
 			e.setCurrent(fmt.Sprintf("%s: %d changes", f.path, len(all)))
 			return nil
@@ -207,7 +239,7 @@ func (e *Engine) syncMailFolder(ctx context.Context, f mailFolder) error {
 			if err := e.retire(it.Path); err != nil {
 				return err
 			}
-			e.count(SvcMail, func(c *status.Counters) { c.Deleted++ })
+			e.count(svc, func(c *status.Counters) { c.Deleted++ })
 		}
 	}
 	if err := e.st.Delete(coll, removed...); err != nil {
@@ -218,13 +250,13 @@ func (e *Engine) syncMailFolder(ctx context.Context, f mailFolder) error {
 	var jobs []mailMessage
 	for _, m := range todo {
 		if it, ok := known[m.ID]; ok && it.Path != "" && exists(e.abs(it.Path)) {
-			e.count(SvcMail, func(c *status.Counters) { c.Unchanged++ })
+			e.count(svc, func(c *status.Counters) { c.Unchanged++ })
 			continue
 		}
 		jobs = append(jobs, m)
 	}
 
-	e.setPhase(SvcMail, "downloading "+f.path)
+	e.setPhase(svc, "downloading "+f.path)
 	var mu sync.Mutex
 	dirty := false
 	e.addQueued(int64(len(jobs)))
@@ -237,10 +269,10 @@ func (e *Engine) syncMailFolder(ctx context.Context, f mailFolder) error {
 		if mt.IsZero() {
 			mt = m.LastModified
 		}
-		n, err := e.download(ctx, u, rel, -1, mt, "", mailPrefer)
-		e.count(SvcMail, func(c *status.Counters) { c.Bytes += n })
+		n, err := e.download(ctx, src.g, u, rel, -1, mt, "", mailPrefer)
+		e.count(svc, func(c *status.Counters) { c.Bytes += n })
 		if err != nil {
-			retry, fatal := e.itemError(SvcMail, rel, err)
+			retry, fatal := e.itemError(svc, rel, err)
 			if fatal != nil {
 				return fatal
 			}
@@ -252,7 +284,7 @@ func (e *Engine) syncMailFolder(ctx context.Context, f mailFolder) error {
 			}
 			return e.st.Put(coll, m.ID, store.Item{Path: "", Skipped: true})
 		}
-		e.count(SvcMail, func(c *status.Counters) { c.New++ })
+		e.count(svc, func(c *status.Counters) { c.New++ })
 		return e.st.Put(coll, m.ID, store.Item{Path: rel, ModTime: mt})
 	})
 	if err != nil {

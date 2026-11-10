@@ -21,7 +21,7 @@ import (
 )
 
 // ErrNotLoggedIn is returned when no token is stored.
-var ErrNotLoggedIn = errors.New("not logged in: run `ms365backupd login`")
+var ErrNotLoggedIn = errors.New("not logged in")
 
 type tokenFile struct {
 	Token    *oauth2.Token `json:"token"`
@@ -34,24 +34,53 @@ type tokenFile struct {
 
 // Authenticator manages tokens.
 type Authenticator struct {
-	oc   *oauth2.Config
-	path string
-	cfg  *config.Config
+	oc       *oauth2.Config
+	path     string
+	tenantID string
+	clientID string
+	graphURL string
+	// LoginCmd is the command that signs in again (shown in error messages).
+	LoginCmd string
 }
 
-// New builds an authenticator for cfg.
+// New builds the authenticator of the main account.
 func New(cfg *config.Config) *Authenticator {
-	ep := microsoft.AzureADEndpoint(cfg.TenantID)
+	return newAuth(cfg.TenantID, cfg.ClientID, cfg.GraphURL, cfg.Scopes(), TokenPath(), "ms365backupd login")
+}
+
+// ForMailbox builds the authenticator of an additional Graph mailbox. It has its own
+// token file and only asks for read access to mail.
+func ForMailbox(cfg *config.Config, m *config.Mailbox) *Authenticator {
+	return newAuth(cfg.MailboxTenant(m), cfg.MailboxClient(m), cfg.GraphURL, config.MailboxScopes,
+		MailboxTokenPath(m.Name), "ms365backupd mailbox login "+m.Name)
+}
+
+func newAuth(tenantID, clientID, graphURL string, scopes []string, path, loginCmd string) *Authenticator {
+	ep := microsoft.AzureADEndpoint(tenantID)
 	ep.AuthStyle = oauth2.AuthStyleInParams // public client: no secret, client_id in body
 	return &Authenticator{
-		cfg:  cfg,
-		path: TokenPath(),
-		oc:   &oauth2.Config{ClientID: cfg.ClientID, Endpoint: ep, Scopes: cfg.Scopes()},
+		tenantID: tenantID, clientID: clientID, graphURL: graphURL, path: path, LoginCmd: loginCmd,
+		oc: &oauth2.Config{ClientID: clientID, Endpoint: ep, Scopes: scopes},
 	}
 }
 
 // TokenPath is the token file location.
 func TokenPath() string { return filepath.Join(config.Dir(), "token.json") }
+
+// MailboxTokenPath is the token file of an additional Graph mailbox.
+func MailboxTokenPath(name string) string {
+	return filepath.Join(config.Dir(), "mailboxes", strings.ToLower(name)+".token.json")
+}
+
+// Scopes returns the requested permissions.
+func (a *Authenticator) Scopes() []string { return a.oc.Scopes }
+
+// Path returns the token file location.
+func (a *Authenticator) Path() string { return a.path }
+
+func (a *Authenticator) notLoggedIn() error {
+	return fmt.Errorf("%w: run `%s`", ErrNotLoggedIn, a.LoginCmd)
+}
 
 func httpCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: 60 * time.Second})
@@ -68,10 +97,10 @@ type DeviceLogin struct {
 
 // StartLogin requests a device code.
 func (a *Authenticator) StartLogin(ctx context.Context) (*DeviceLogin, error) {
-	if a.cfg.TenantID == "" {
+	if a.tenantID == "" {
 		return nil, errors.New("tenant_id not configured: set the Directory (tenant) ID of your app registration (see README)")
 	}
-	if a.cfg.ClientID == "" {
+	if a.clientID == "" {
 		return nil, errors.New("client_id not configured (see README: app registration)")
 	}
 	da, err := a.oc.DeviceAuth(httpCtx(ctx))
@@ -89,7 +118,7 @@ func (d *DeviceLogin) Wait(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("device token: %w", err)
 	}
-	tf := &tokenFile{Token: tok, ClientID: a.cfg.ClientID, TenantID: a.cfg.TenantID, Scopes: grantedScopes(tok, a.oc.Scopes)}
+	tf := &tokenFile{Token: tok, ClientID: a.clientID, TenantID: a.tenantID, Scopes: grantedScopes(tok, a.oc.Scopes)}
 	if err := a.save(tf); err != nil {
 		return "", err
 	}
@@ -102,7 +131,7 @@ func (d *DeviceLogin) Wait(ctx context.Context) (string, error) {
 }
 
 func (a *Authenticator) fetchAccount(ctx context.Context, tok *oauth2.Token) (string, error) {
-	base := a.cfg.GraphURL
+	base := a.graphURL
 	if base == "" {
 		base = "https://graph.microsoft.com/v1.0"
 	}
@@ -183,7 +212,7 @@ func (a *Authenticator) Logout() error {
 func (a *Authenticator) load() (*tokenFile, error) {
 	b, err := os.ReadFile(a.path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNotLoggedIn
+		return nil, a.notLoggedIn()
 	}
 	if err != nil {
 		return nil, err
@@ -193,7 +222,7 @@ func (a *Authenticator) load() (*tokenFile, error) {
 		return nil, fmt.Errorf("corrupt token file %s: %w", a.path, err)
 	}
 	if tf.Token == nil || tf.Token.RefreshToken == "" {
-		return nil, ErrNotLoggedIn
+		return nil, a.notLoggedIn()
 	}
 	return &tf, nil
 }
@@ -220,11 +249,11 @@ func (a *Authenticator) TokenSource(ctx context.Context) (oauth2.TokenSource, er
 	if err != nil {
 		return nil, err
 	}
-	if a.cfg.TenantID == "" {
+	if a.tenantID == "" {
 		return nil, errors.New("tenant_id not configured: set the Directory (tenant) ID of your app registration")
 	}
-	if tf.ClientID != "" && tf.ClientID != a.cfg.ClientID {
-		return nil, fmt.Errorf("stored token belongs to client_id %s; run `ms365backupd login` again", tf.ClientID)
+	if tf.ClientID != "" && tf.ClientID != a.clientID {
+		return nil, fmt.Errorf("stored token belongs to client_id %s; run `%s` again", tf.ClientID, a.LoginCmd)
 	}
 	base := a.oc.TokenSource(httpCtx(context.WithoutCancel(ctx)), tf.Token)
 	return &savingSource{base: base, last: tf.Token.AccessToken, tf: tf, a: a}, nil

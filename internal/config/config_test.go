@@ -92,3 +92,59 @@ func TestSharePointSitesDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestMailboxes(t *testing.T) {
+	c := Default()
+	if err := c.AddMailbox(Mailbox{Name: "a b", Type: MailboxGraph}); err == nil {
+		t.Fatal("invalid name accepted")
+	}
+	if err := c.AddMailbox(Mailbox{Name: "imap", Type: MailboxIMAP, Host: "h"}); err == nil {
+		t.Fatal("imap without username/password accepted")
+	}
+	if err := c.AddMailbox(Mailbox{Name: "Work", Type: MailboxGraph}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddMailbox(Mailbox{Name: "work", Type: MailboxGraph}); err == nil {
+		t.Fatal("duplicate name (case-insensitive) accepted")
+	}
+	m := Mailbox{Name: "gmx", Type: MailboxIMAP, Host: "imap.gmx.net", Username: "u", Password: "pw"}
+	if err := c.AddMailbox(m); err != nil {
+		t.Fatal(err)
+	}
+	if m.IMAPAddr() != "imap.gmx.net:993" {
+		t.Fatal(m.IMAPAddr())
+	}
+	m.TLS = "starttls"
+	if m.IMAPAddr() != "imap.gmx.net:143" {
+		t.Fatal(m.IMAPAddr())
+	}
+	c.TenantID = "t"
+	if c.MailboxTenant(&c.Mailboxes[0]) != "t" {
+		t.Fatal("tenant default")
+	}
+
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := c.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Edit(p, func(c *Config) error { return c.SetMailboxDisabled("WORK", true) })
+	if err != nil || len(got.Mailboxes) != 2 || !got.Mailboxes[0].Disabled || len(got.ActiveMailboxes()) != 1 {
+		t.Fatalf("edit: %v %+v", err, got)
+	}
+	if got.Redacted().Mailboxes[1].Password == "pw" || got.Mailboxes[1].Password != "pw" {
+		t.Fatal("redaction")
+	}
+	if _, err := Edit(p, func(c *Config) error { _, err := c.RemoveMailbox("nope"); return err }); err == nil {
+		t.Fatal("removing unknown mailbox succeeded")
+	}
+	got, _ = Edit(p, func(c *Config) error { _, err := c.RemoveMailbox("work"); return err })
+	b, _ := os.ReadFile(p)
+	if len(got.Mailboxes) != 1 || !strings.Contains(string(b), `"mailboxes": [`) {
+		t.Fatalf("remove: %+v", got.Mailboxes)
+	}
+	got, _ = Edit(p, func(c *Config) error { _, err := c.RemoveMailbox("gmx"); return err })
+	b, _ = os.ReadFile(p)
+	if len(got.Mailboxes) != 0 || !strings.Contains(string(b), `"mailboxes": []`) {
+		t.Fatalf("empty list must be written as []: %s", b)
+	}
+}

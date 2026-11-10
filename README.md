@@ -2,7 +2,8 @@
 
 A small, robust daemon that backs up a Microsoft 365 account (OneDrive, SharePoint
 document libraries, Exchange mail, contacts and calendars) **incrementally** to an external
-USB disk.
+USB disk. Additional mailboxes (other Microsoft 365 accounts or any IMAP server) can be
+backed up alongside.
 
 **Warning:** This sideproject was implemented mainly using AI tools. Use it with a bigger
 grain of salt than with other open source projects you're using.
@@ -42,6 +43,7 @@ queries give the incremental behaviour that rsync would otherwise provide.
   mail/<folder>/<year>/<date>_<subject>_<id>.eml   one RFC 822 file per message (MIME)
   contacts/<folder>/*.json + *.vcf
   calendar/<calendar>/*.json      full Graph event objects (UTC)
+  mailboxes/<name>/<folder>/<year>/*.eml   additional mailboxes (Graph or IMAP)
   .deleted/<YYYY-MM-DD>/…         items deleted/replaced in M365 (keep_deleted)
 ```
 
@@ -92,7 +94,7 @@ ms365backupd                 # first start without a config file opens the setup
 ms365backupd tui --setup     # later: or press s in the dashboard
 ```
 
-It walks through Account → Disk → Data → Schedule → Email → Save, shows what is already
+It walks through Account → Disk → Data → Mailboxes → Schedule → Email → Save, shows what is already
 configured (`default`, `● changed (was …)`), validates every field and checks the disk
 live. It writes `~/.config/ms365backupd/config.json` (mode 0600) only when you choose
 *save* (enter on the last step, or ctrl+s anywhere); esc discards. Settings without a field
@@ -101,6 +103,8 @@ press **l** to sign in right in the TUI.
 
 Keys: tab/shift+tab or ↑/↓ move between fields, ←/→ or space change toggles and choices,
 pgdn/pgup (ctrl+n/ctrl+p) switch steps. In the exclude box enter adds a line and tab leaves it.
+In the Mailboxes step: **a** add, **d** remove, **space** enable/disable, **l** sign in
+(graph mailbox), **t** test the login; ↑/↓ select.
 
 Without the TUI:
 
@@ -191,6 +195,35 @@ Entries can be combined; a site found twice is backed up once. Exclude a single 
 sends through the backed-up mailbox and needs the `Mail.Send` permission. If no `email.to`
 is set, no mail is sent. Set `weekly_report_day` to `"off"` to disable the weekly report.
 
+**Additional mailboxes** (`mailboxes`) are backed up to `mailboxes/<name>/`, independently
+of `services.mail`. Manage them with `ms365backupd mailbox …` (writes the config file right away) or in the
+setup's Mailboxes step (press **a** on the dashboard; written when you save the setup). Both
+tell a running daemon. Each entry is one object:
+
+```json
+"mailboxes": [
+  { "name": "shared", "type": "graph" },
+  { "name": "other-tenant", "type": "graph", "tenant_id": "…", "client_id": "…" },
+  { "name": "gmx", "type": "imap", "host": "imap.gmx.net", "username": "me@gmx.de",
+    "password_file": "~/.config/ms365backupd/gmx-password" }
+]
+```
+
+- `type: "graph"` is any Microsoft 365 account with its **own sign-in**
+  (`ms365backupd mailbox login <name>`, or **l** in the setup's Mailboxes step). It only asks
+  for `Mail.Read`. `tenant_id`/`client_id` default to the main ones; for an account in another
+  tenant, use an app registration that allows that tenant (e.g. multitenant, or one registered
+  there). The token is stored in `~/.config/ms365backupd/mailboxes/<name>.token.json`.
+- `type: "imap"` takes `host`, `username`, `password` or `password_file` (preferred: keeps
+  the password out of the config), `port` (default 993, or 143 with `starttls`/`none`) and
+  `tls` (`tls` default, `starttls`, `none`). Messages are tracked by UID; when the server
+  changes a folder's UIDVALIDITY, that folder is fetched again.
+- `"disabled": true` skips a mailbox but keeps its settings and sign-in.
+- A failing mailbox (e.g. sign-in expired) makes the run *partial*, names the mailbox, and does
+  not stop the other mailboxes or mark the main account as logged out.
+- Removing a mailbox keeps its files on the disk. Exclude single folders with
+  `mailboxes/<name>/<folder>`.
+
 **Flags** override the file, for example
 `ms365backupd backup --target /Volumes/SSD --require-mount=false -x 'onedrive/Big Stuff'`.
 `--exclude` adds to the configured list. `--email-to` and `--services` replace it.
@@ -225,12 +258,27 @@ The daemon:
 
 ```
 ms365backupd status            # daemon, disk, next run, last result
-ms365backupd tui               # dashboard: b=backup f=full resync c=cancel m=mail report s=setup l=sign in q=quit
-ms365backupd backup [--full] [-s mail,sharepoint]
+ms365backupd tui               # dashboard: b=backup f=full resync c=cancel m=mail report s=setup l=sign in a=mailboxes q=quit
+ms365backupd backup [--full] [-s mail,sharepoint,mailboxes]
+ms365backupd mailbox list|add|remove|login|logout|test|enable|disable   # additional mailboxes
 ms365backupd history -n 30
 ms365backupd report --print    # preview the weekly report
 ms365backupd completion zsh|bash|fish   # or: make install-completions
 ```
+
+Examples for additional mailboxes:
+
+```sh
+ms365backupd mailbox add shared --type graph --login      # sign in as the other account
+ms365backupd mailbox add gmx --type imap --host imap.gmx.net --username me@gmx.de \
+    --password-file ~/.config/ms365backupd/gmx-password   # without a password option: prompt
+ms365backupd mailbox test gmx
+ms365backupd mailbox remove gmx                           # files on the disk are kept
+```
+
+In the TUI, **a** opens the setup at the Mailboxes step: **a** add, **d** remove,
+**space** enable/disable, **l** sign in (graph), **t** test. Save the setup (ctrl+s) to apply;
+esc discards the changes.
 
 `backup` asks the running daemon to start a run. Without a daemon it runs in the foreground.
 Exit codes: 0 means success, 2 means partial (some items will be retried), 1 means failure.
@@ -259,6 +307,12 @@ Things that were not obvious during a real setup:
 - **After replacing the binary, restart the daemon** (`sudo systemctl restart ms365backupd`, or
   `launchctl kickstart -k gui/$(id -u)/net.ulbrich.ms365backupd` on macOS). Config changes only
   need a reload; a new binary needs a restart.
+- **Additional Graph mailbox "not signed in"**: run `ms365backupd mailbox login <name>` and
+  sign in with *that* account (use a private browser window if the browser is already signed
+  in to the main account). An account from another tenant needs an app registration that
+  accepts it, set as the mailbox's `tenant_id`/`client_id`.
+- **IMAP providers with app passwords** (e.g. Gmail, iCloud): use an app
+  password; the normal password is rejected.
 - **Email via Graph** needs `Mail.Send` on the app *and* a new sign-in after adding it.
   Check with `ms365backupd test-email`.
 

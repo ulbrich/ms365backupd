@@ -495,7 +495,7 @@ func (e *Engine) syncDrive(ctx context.Context, svc, driveID, prefix string) err
 		if strings.HasPrefix(j.n.Hash, "qx:") {
 			qx = strings.TrimPrefix(j.n.Hash, "qx:")
 		}
-		n, err := e.download(ctx, u, j.p, j.n.Size, j.n.ModTime, qx)
+		n, err := e.download(ctx, e.g, u, j.p, j.n.Size, j.n.ModTime, qx)
 		e.count(svc, func(c *status.Counters) { c.Bytes += n })
 		if err != nil {
 			retry, fatal := e.itemError(svc, j.p, err)
