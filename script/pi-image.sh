@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 # Settings file (shell syntax, KEY=value). Variables already set in the environment, e.g.
 # by make image PI_USER=jan, take precedence over the file.
 settings=(PI_IMAGE_URL PI_HOSTNAME MDNS_HOSTNAME PI_USER PI_PASSWORD PI_SSH_KEY PI_TIMEZONE
-	WIFI_SSID WIFI_PASSWORD WIFI_COUNTRY TS_AUTHKEY NODE_MAJOR IMAGE_UPGRADE IMAGE_COMPRESS IMAGE_NAME)
+	PI_SSH_TRUSTED_NETS WIFI_SSID WIFI_PASSWORD WIFI_COUNTRY TS_AUTHKEY NODE_MAJOR IMAGE_UPGRADE IMAGE_COMPRESS IMAGE_NAME)
 env_file="${PI_IMAGE_ENV:-pi-image/env}"
 if [[ -f "$env_file" ]]; then
 	saved=""
@@ -37,6 +37,8 @@ export APP_VSN="${APP_VSN:-dev}"
 export PI_IMAGE_URL="${PI_IMAGE_URL:-https://downloads.raspberrypi.com/raspios_lite_arm64_latest}"
 export PI_HOSTNAME="${PI_HOSTNAME:-ms365backup}"
 export MDNS_HOSTNAME="${MDNS_HOSTNAME:-}"
+PI_SSH_TRUSTED_NETS="${PI_SSH_TRUSTED_NETS:-}"
+export PI_SSH_TRUSTED_NETS="${PI_SSH_TRUSTED_NETS// /}"
 export PI_USER="${PI_USER:-pi}"
 PI_PASSWORD="${PI_PASSWORD:-}"
 PI_SSH_KEY="${PI_SSH_KEY:-}"
@@ -56,6 +58,13 @@ hostname_re='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
 [[ "$PI_HOSTNAME" =~ $hostname_re ]] || die "invalid PI_HOSTNAME: $PI_HOSTNAME"
 [[ -z "$MDNS_HOSTNAME" || "$MDNS_HOSTNAME" =~ $hostname_re ]] ||
 	die "invalid MDNS_HOSTNAME: $MDNS_HOSTNAME (a name like foo, without .local)"
+if [[ -n "$PI_SSH_TRUSTED_NETS" ]]; then
+	IFS=, read -r -a nets <<<"$PI_SSH_TRUSTED_NETS"
+	for n in "${nets[@]}"; do
+		[[ "$n" =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] ||
+			die "invalid PI_SSH_TRUSTED_NETS entry: '$n' (comma-separated addresses or CIDR networks)"
+	done
+fi
 [[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] || die "invalid NODE_MAJOR: $NODE_MAJOR"
 if [[ -n "$WIFI_SSID" && ! "$WIFI_COUNTRY" =~ ^[A-Z]{2}$ ]]; then
 	die "WIFI_SSID needs WIFI_COUNTRY (two-letter code such as DE or US)"
@@ -113,6 +122,7 @@ print_password
 # Values are passed by name (-e VAR) so secrets do not show up in the process list.
 docker run --rm --privileged \
 	-e APP_VSN -e PI_IMAGE_URL -e PI_HOSTNAME -e MDNS_HOSTNAME -e PI_USER -e PI_PASSWORD -e PI_SSH_PUBKEY \
+	-e PI_SSH_TRUSTED_NETS \
 	-e PI_TIMEZONE -e WIFI_SSID -e WIFI_PASSWORD -e WIFI_COUNTRY -e TS_AUTHKEY -e NODE_MAJOR \
 	-e IMAGE_UPGRADE -e IMAGE_COMPRESS -e IMAGE_NAME \
 	-v "$PWD:/src:ro" -v "$PWD/.cache/pi-image:/cache" -v "$PWD/bin:/out" \

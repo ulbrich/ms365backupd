@@ -17,7 +17,7 @@ apt-get install -y --no-install-recommends \
 	ack ripgrep fd-find jq fzf bat tree htop ncdu neovim \
 	python3 python3-pip python3-venv \
 	pandoc weasyprint fonts-dejavu-core \
-	exfatprogs
+	exfatprogs fdisk
 ln -sf /usr/bin/fdfind /usr/local/bin/fd
 ln -sf /usr/bin/batcat /usr/local/bin/bat
 
@@ -79,6 +79,15 @@ if [[ -n "$PI_SSH_PUBKEY" ]]; then
 fi
 systemctl disable userconfig.service 2>/dev/null || true
 rm -f /etc/ssh/sshd_config.d/rename_user.conf
+# OpenSSH >= 9.8 blocks addresses for a while after timeouts or failed logins
+# (PerSourcePenalties); never for the trusted networks.
+if [[ -n "$PI_SSH_TRUSTED_NETS" ]]; then
+	printf '# Written by make image (PI_SSH_TRUSTED_NETS)\nPerSourcePenaltyExemptList %s\n' "$PI_SSH_TRUSTED_NETS" \
+		>/etc/ssh/sshd_config.d/50-trusted-nets.conf
+	mkdir -p /run/sshd
+	ssh-keygen -A >/dev/null # for sshd -t only; host keys are removed again below
+	sshd -t
+fi
 
 # Claude Code: native installer, per user (~/.local/bin, auto-updates).
 su - "$PI_USER" -c 'curl -fsSL https://claude.ai/install.sh | bash'
@@ -165,7 +174,8 @@ systemctl enable ms365backupd.service
 cat >/etc/motd <<EOF
 
 ms365backupd $APP_VSN is installed but not configured yet:
-  1. Mount the backup disk at /mnt/backup (nofail), see
+  1. Mount the backup disk at /mnt/backup (by UUID, nofail) and chown it to $PI_USER,
+     see README "New Raspberry Pi: step by step" and
      /usr/local/share/doc/ms365backupd/fstab.example
   2. ms365backupd                    setup screen; then press l to sign in
   3. sudo systemctl start ms365backupd

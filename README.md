@@ -123,6 +123,7 @@ MDNS_HOSTNAME="foo"                          # ssh foo.local
 | `PI_SSH_KEY` | `pi-image/ssh/authorized_keys`, else the first of `~/.ssh/id_{ed25519,ecdsa,rsa}.pub` | file with the public key(s) for SSH; with a key, SSH password login is off |
 | `PI_PASSWORD` | generated | password for the console (and SSH if there is no key). A generated one is printed at the start and end of the build |
 | `PI_HOSTNAME` | `ms365backup` | host name; announced as `<hostname>.local` unless `MDNS_HOSTNAME` is set |
+| `PI_SSH_TRUSTED_NETS` | none | comma-separated addresses or CIDR networks, e.g. `192.168.1.0/24,fd00:1234:5678::/64`, that OpenSSH never blocks. Since OpenSSH 9.8, `sshd` refuses an address for up to 10 minutes after logins from it time out or fail (`PerSourcePenalties`), which looks like the Pi is unreachable (`kex_exchange_identification: Connection closed by remote host`) |
 | `MDNS_HOSTNAME` | `PI_HOSTNAME` | Bonjour/mDNS name without `.local`: `foo` makes the Pi reachable as `foo.local` (`ssh foo.local`). SSH is also announced as a service (`dns-sd -B _ssh._tcp`) |
 | `PI_TIMEZONE` | the host's | e.g. `Europe/Berlin` |
 | `WIFI_SSID`, `WIFI_PASSWORD`, `WIFI_COUNTRY` | none | WiFi; Ethernet works without settings |
@@ -165,6 +166,96 @@ announced via mDNS; `dns-sd -G v4 foo.local` resolves one name. Otherwise look f
 router's DHCP list, or for a Raspberry Pi MAC address (`b8:27:eb`, `dc:a6:32`, `e4:5f:01`,
 `d8:3a:dd`, `2c:cf:67`, `88:a2:9e`) in `arp -a` after `nmap -sn 192.168.1.0/24`. Without WiFi
 settings in the image, the Pi needs Ethernet.
+
+### New Raspberry Pi: step by step
+
+What you need: a Pi 3/4/5 (a Pi 4 or 5 for a USB SSD), its **official power supply** (a USB
+SSD on a weak supply causes undervoltage, I/O errors and resets), an SD card of 8 GB or more,
+the backup SSD, and the app registration from step 1.
+
+1. **Build the image** on your Mac or Linux machine (once: `make setup`, and start Docker
+   Desktop):
+
+   ```sh
+   cp pi-image/env.example pi-image/env     # set WIFI_*, optionally MDNS_HOSTNAME, PI_SSH_TRUSTED_NETS
+   mkdir -p pi-image/ssh && cat ~/.ssh/id_ed25519.pub >> pi-image/ssh/authorized_keys   # optional
+   make image                               # note the generated password it prints
+   ```
+
+2. **Flash** `bin/ms365backupd-rpi-arm64-<version>.img.xz` with Raspberry Pi Imager (*Use
+   custom*, then **No** to OS customisation) or `dd`, see *Flashing* above.
+3. **Boot and log in.** Insert the card, connect the SSD (on a Pi 4 to a blue USB 3 port) and
+   power on. After 2–3 minutes: `ssh pi@ms365backup.local` (if you flashed a Pi before under
+   that name: `ssh-keygen -R ms365backup.local` first). The message of the day lists the
+   remaining steps.
+4. **Prepare the backup disk.** Find it with `lsblk -f` (usually `/dev/sda`). For a new or
+   empty disk, create one ext4 partition. This **erases the disk**:
+
+   ```sh
+   sudo wipefs -a /dev/sda
+   echo ',,L' | sudo sfdisk --label gpt /dev/sda
+   sudo mkfs.ext4 -L m365backup /dev/sda1
+   ```
+
+5. **Mount it at `/mnt/backup`** by UUID, with `nofail` so the Pi boots without the disk:
+
+   ```sh
+   uuid=$(sudo blkid -s UUID -o value /dev/sda1)
+   echo "UUID=$uuid /mnt/backup ext4 defaults,noatime,nofail,x-systemd.device-timeout=10s 0 2" | sudo tee -a /etc/fstab
+   sudo systemctl daemon-reload
+   sudo mount /mnt/backup
+   sudo chown "$USER": /mnt/backup          # a new ext4 filesystem belongs to root
+   findmnt /mnt/backup                      # must show /dev/sda1
+   ```
+
+   Only one line in `/etc/fstab` may mount `/mnt/backup`; replace an old one instead of adding
+   a second. For exFAT see `/usr/local/share/doc/ms365backupd/fstab.example`.
+6. **Configure and sign in:** run `ms365backupd`. The setup screen opens; enter the tenant
+   ID, client ID and `/mnt/backup` as target, save with ctrl+s, then press **l** and sign in
+   with the code on any device's browser (see *3. Configure*).
+7. **Start the service** (it is already enabled and starts on every boot from now on):
+
+   ```sh
+   sudo systemctl start ms365backupd
+   ms365backupd status                      # disk "available", backup running
+   journalctl -u ms365backupd -f            # follow the log
+   ```
+
+   The first full backup can take hours to days, depending on the amount of data. It
+   continues after a reboot or reconnecting the disk.
+8. **Optional:** `sudo tailscale up` for remote access, `ms365backupd test-email` to check
+   notifications, `ms365backupd tui` for the dashboard.
+
+### Raspberry Pi troubleshooting
+
+- **`target is not a mount point (disk not connected?)`** although the SSD is plugged in: the
+  UUID in `/etc/fstab` does not match the disk, typically after reformatting it (a new
+  filesystem gets a new UUID). Compare `sudo blkid` with `grep backup /etc/fstab`, fix the
+  line, then `sudo systemctl daemon-reload && sudo mount /mnt/backup` and, for a new ext4
+  filesystem, `sudo chown "$USER": /mnt/backup`. The daemon notices the disk by itself.
+- **`permission denied` writing to `/mnt/backup`**: the filesystem root belongs to root; run
+  `sudo chown "$USER": /mnt/backup` while the disk is mounted.
+- **`kex_exchange_identification: Connection closed by remote host`** on `ssh`: OpenSSH blocks
+  an address for a few minutes after failed or timed-out logins (`PerSourcePenalties`). Wait
+  up to 10 minutes. To prevent it, build the image with `PI_SSH_TRUSTED_NETS`, or on a running
+  Pi:
+
+  ```sh
+  echo 'PerSourcePenaltyExemptList 192.168.1.0/24' | sudo tee /etc/ssh/sshd_config.d/50-trusted-nets.conf
+  sudo sshd -t && sudo systemctl reload ssh
+  ```
+
+- **`REMOTE HOST IDENTIFICATION HAS CHANGED`** after flashing again: `ssh-keygen -R
+  ms365backup.local` (and the IP address, if you used it).
+- **Did the Pi reboot or the daemon restart?** `uptime -s` and `journalctl --list-boots` show
+  the boots, `systemctl show ms365backupd -p ActiveEnterTimestamp -p NRestarts` the daemon's
+  start and restarts. `journalctl -b -1 -n 50` shows the end of the previous boot; if it just
+  stops, power was lost. `vcgencmd get_throttled` other than `0x0` means undervoltage or
+  overheating: use the official power supply, or a powered USB hub or an SSD with its own
+  power.
+- **The backup does not start:** `systemctl status ms365backupd`. The service only starts once
+  `~/.config/ms365backupd/config.json` exists; `ms365backupd config validate` checks it and
+  `ms365backupd status` shows the disk and sign-in state.
 
 ## 3. Configure
 

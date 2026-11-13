@@ -53,6 +53,38 @@ New make targets need a `## description` comment so `make help` lists them.
 - The setup wizard writes only on save; cancel must leave the file untouched.
   Keys of the config without a wizard field must survive a save.
 
+## Raspberry Pi image (`make image`)
+
+- `script/pi-image.sh` runs on the host (macOS has **bash 3.2**: no `[[ -v ]]`, no
+  `declare -A`, no `${x,,}`), reads `pi-image/env`, validates, then runs
+  `script/pi-image/build.sh` in a privileged `debian:trixie` container. `build.sh` grows,
+  mounts and shrinks the image and writes cloud-init `user-data`/`network-config` to the boot
+  partition; `script/pi-image/provision.sh` runs in the arm64 chroot (packages, user, sshd,
+  avahi, systemd units, motd).
+- A new setting must be added in four places: the `settings` list and defaults in
+  `pi-image.sh`, the `docker run -e` list, `pi-image/env.example`, and the README table.
+  Secrets are passed by name (`-e VAR`), never as values on a command line.
+- `pi-image/env` and `pi-image/ssh/` are private (WiFi password, keys): never commit, print or
+  quote them; `env.example` uses only generic example values. Built images contain the WiFi
+  PSK and password hash.
+- The motd in `provision.sh` and the README sections *New Raspberry Pi: step by step* and
+  *Raspberry Pi troubleshooting* describe the same first steps; keep them in sync.
+- A full build takes long (downloads, full-upgrade, emulation on x86_64). For script-only
+  changes, test with a stub `docker` and `bash` 3.2, and `sshd -t` for sshd snippets.
+
+### Helping on a running Pi
+
+Known failure causes, in order of likelihood:
+- `target is not a mount point`: `/etc/fstab` UUID does not match `sudo blkid` (disk was
+  reformatted). Fix the line, `systemctl daemon-reload`, `mount /mnt/backup`, and `chown` a
+  new ext4 root to the user.
+- `kex_exchange_identification: Connection closed`: OpenSSH `PerSourcePenalties`; wait, or
+  set `PerSourcePenaltyExemptList` (`PI_SSH_TRUSTED_NETS`).
+- Unexpected reboots / I/O errors: undervoltage from the USB SSD (`vcgencmd get_throttled`,
+  `journalctl -b -1`).
+Change system files on a user's Pi only with their explicit OK, and back them up first
+(e.g. `/etc/fstab.bak`).
+
 ## Working in this repo
 
 - The Bash sandbox blocks reading this directory; commands need the sandbox disabled.

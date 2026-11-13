@@ -86,7 +86,7 @@ PI_PASSWORD_HASH=""
 log "provisioning (arm64 chroot)"
 chroot "$root" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 	HOME=/root TERM=dumb LANG=C.UTF-8 \
-	APP_VSN="$APP_VSN" PI_HOSTNAME="$PI_HOSTNAME" MDNS_HOSTNAME="$MDNS_HOSTNAME" PI_USER="$PI_USER" PI_PASSWORD_HASH="$PI_PASSWORD_HASH" \
+	APP_VSN="$APP_VSN" PI_HOSTNAME="$PI_HOSTNAME" MDNS_HOSTNAME="$MDNS_HOSTNAME" PI_SSH_TRUSTED_NETS="$PI_SSH_TRUSTED_NETS" PI_USER="$PI_USER" PI_PASSWORD_HASH="$PI_PASSWORD_HASH" \
 	PI_SSH_PUBKEY="$PI_SSH_PUBKEY" TS_AUTHKEY="$TS_AUTHKEY" NODE_MAJOR="$NODE_MAJOR" \
 	IMAGE_UPGRADE="$IMAGE_UPGRADE" /bin/bash /root/provision.sh
 rm -f "$root/root/provision.sh"
