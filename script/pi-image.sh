@@ -19,7 +19,8 @@ env_file="${PI_IMAGE_ENV:-pi-image/env}"
 if [[ -f "$env_file" ]]; then
 	saved=""
 	for v in "${settings[@]}"; do
-		[[ -v $v ]] && saved+="$(declare -p "$v")"$'\n'
+		# declare -p fails for unset variables ([[ -v ]] needs bash 4.2; macOS has 3.2)
+		if declare -p "$v" >/dev/null 2>&1; then saved+="$(declare -p "$v")"$'\n'; fi
 	done
 	set -a
 	# shellcheck source=/dev/null
