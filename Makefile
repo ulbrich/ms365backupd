@@ -1,4 +1,4 @@
-.PHONY: help build build-pi build-pi32 dist test vet fmt check install install-completions clean release next-version
+.PHONY: help setup build build-pi build-pi32 dist image test vet fmt check install install-completions clean release next-version
 
 SHELL := /bin/bash
 
@@ -18,6 +18,9 @@ help:
 	@echo "$(APP_NAME) $(APP_VSN)"
 	@perl -nle'print $& if m{^[a-zA-Z0-9_-]+:.*?## .*$$}' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
+setup: ## Install the build and Pi image tools: Go, xz, Docker, Raspberry Pi Imager (Homebrew or apt)
+	script/setup.sh
+
 build: ## Build bin/ms365backupd for this machine
 	$(GOBUILD) -o bin/$(APP_NAME) ./cmd/ms365backupd
 
@@ -26,6 +29,9 @@ build-pi: ## Build for Raspberry Pi 3/4/5 with 64-bit Raspberry Pi OS (bin/*-lin
 
 build-pi32: ## Build for 32-bit Raspberry Pi OS, Pi 2/3/4/Zero 2 (bin/*-linux-armv7)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(APP_NAME)-linux-armv7 ./cmd/ms365backupd
+
+image: build-pi ## Build a headless Raspberry Pi OS Lite image with ms365backupd and tools (bin/*.img.xz; needs Docker, see README)
+	APP_VSN=$(APP_VSN) script/pi-image.sh
 
 dist: ## Build all release binaries plus bin/SHA256SUMS
 	@set -e; for t in $(DIST); do \

@@ -85,6 +85,87 @@ ssh pi@raspberrypi 'sudo install -m755 /tmp/ms365backupd /usr/local/bin/'
 Mount the SSD with `nofail` (see `deploy/systemd/fstab.example`). ext4 is recommended. exFAT
 works if the disk also has to be readable on a Mac.
 
+### Ready-made Raspberry Pi image
+
+`make setup` installs what is needed to build and flash it (Go, xz, Docker, Raspberry Pi
+Imager; Homebrew on macOS, apt on Debian/Ubuntu). `make image` builds a headless Raspberry Pi OS Lite (64-bit, Pi 3/4/5/Zero 2) image with
+ms365backupd installed as an enabled systemd service. Only the configuration is missing: the
+service starts once `~/.config/ms365backupd/config.json` exists. It needs Docker (Linux or
+Docker Desktop on macOS). On x86_64 hosts it registers arm64 emulation once
+(`tonistiigi/binfmt`), and the build is much slower there. The result is
+`bin/ms365backupd-rpi-arm64-<version>.img.xz`; see *Flashing* below.
+
+Preinstalled: openssh-server, tailscale, git, gh, curl, rsync, glow, ack, ripgrep, fd, jq, fzf,
+bat, tree, htop, ncdu, neovim, pandoc with weasyprint (PDF), Node.js LTS, Python 3 with pip and
+uv, [Claude Code](https://claude.com/claude-code) (`claude`), [pi](https://pi.dev) (`pi`),
+[herdr](https://herdr.dev) (`herdr`) and the [Open Knowledge](https://openknowledge.sh) CLI
+(`okn`). The download of Raspberry Pi OS is cached in `.cache/pi-image/`.
+
+```sh
+make image PI_USER=jan                       # SSH keys from pi-image/ssh/authorized_keys, generated password
+make image PI_PASSWORD=secret WIFI_SSID=Home WIFI_PASSWORD=… WIFI_COUNTRY=DE
+```
+
+The settings can also be kept in `pi-image/env` (shell syntax, `KEY="value"`; not committed,
+as it holds the WiFi password). Variables on the command line override the file;
+`PI_IMAGE_ENV=<file>` reads another one:
+
+```sh
+WIFI_SSID="Home"
+WIFI_PASSWORD="…"
+WIFI_COUNTRY="DE"
+MDNS_HOSTNAME="foo"                          # ssh foo.local
+```
+
+| Variable | Default | |
+|---|---|---|
+| `PI_USER` | `pi` | login user (passwordless sudo) |
+| `PI_SSH_KEY` | `pi-image/ssh/authorized_keys`, else the first of `~/.ssh/id_{ed25519,ecdsa,rsa}.pub` | file with the public key(s) for SSH; with a key, SSH password login is off |
+| `PI_PASSWORD` | generated | password for the console (and SSH if there is no key). A generated one is printed at the start and end of the build |
+| `PI_HOSTNAME` | `ms365backup` | host name; announced as `<hostname>.local` unless `MDNS_HOSTNAME` is set |
+| `MDNS_HOSTNAME` | `PI_HOSTNAME` | Bonjour/mDNS name without `.local`: `foo` makes the Pi reachable as `foo.local` (`ssh foo.local`). SSH is also announced as a service (`dns-sd -B _ssh._tcp`) |
+| `PI_TIMEZONE` | the host's | e.g. `Europe/Berlin` |
+| `WIFI_SSID`, `WIFI_PASSWORD`, `WIFI_COUNTRY` | none | WiFi; Ethernet works without settings |
+| `TS_AUTHKEY` | none | Tailscale auth key: joins the tailnet on first boot, then the key is deleted. Use a one-off key; otherwise run `sudo tailscale up` |
+| `NODE_MAJOR` | `26` | Node.js major version (NodeSource) |
+| `IMAGE_UPGRADE` | `1` | `0` skips upgrading the base image's packages |
+| `IMAGE_COMPRESS` | `1` | `0` writes an uncompressed `.img` |
+| `PI_IMAGE_URL` | latest Raspberry Pi OS Lite arm64 | base image (`.img.xz`) |
+
+The WiFi settings land in `network-config` and the rest of the first-boot settings in
+`user-data` on the boot partition (cloud-init), so they can still be edited after flashing.
+After the first login, the message of the day lists the remaining steps: mount the disk,
+run `ms365backupd` for the setup, `sudo systemctl start ms365backupd`.
+
+**Flashing** (SD card of 8 GB or more). Optionally verify the image first:
+`cd bin && shasum -a 256 -c ms365backupd-rpi-arm64-*.img.xz.sha256`.
+
+- Raspberry Pi Imager: choose your Pi as *Device*, *Use custom* (at the bottom of the
+  *Operating System* list) and the `.img.xz`, then the SD card. Answer **No** to OS
+  customisation: it would replace the user, keys and settings set up in the image.
+- Or on the command line (macOS; on Linux use `lsblk`, `/dev/sdX` and `bs=4M`). `dd`
+  overwrites the disk you name without asking, so check the number and size:
+
+  ```sh
+  diskutil list                       # find the SD card, e.g. /dev/disk4
+  diskutil unmountDisk /dev/disk4
+  xzcat bin/ms365backupd-rpi-arm64-*.img.xz | sudo dd of=/dev/rdisk4 bs=4m status=progress
+  diskutil eject /dev/disk4
+  ```
+
+The first boot takes a minute or two longer: the filesystem grows to fill the card, and
+cloud-init sets the hostname and time zone and creates the SSH host keys. Then log in with
+`ssh <PI_USER>@<MDNS_HOSTNAME or PI_HOSTNAME>.local` (e.g. `ssh pi@ms365backup.local`) and the
+key; the password is for the console and `sudo`. After flashing again, the Pi has new host keys: remove the old
+one with `ssh-keygen -R ms365backup.local`. Without `TS_AUTHKEY`, run `sudo tailscale up`.
+
+**Finding the Pi** if `.local` does not resolve (e.g. mDNS blocked in a guest network):
+`dns-sd -B _ssh._tcp` (macOS) or `avahi-browse -rt _ssh._tcp` (Linux) lists SSH hosts that are
+announced via mDNS; `dns-sd -G v4 foo.local` resolves one name. Otherwise look for the host name in the
+router's DHCP list, or for a Raspberry Pi MAC address (`b8:27:eb`, `dc:a6:32`, `e4:5f:01`,
+`d8:3a:dd`, `2c:cf:67`, `88:a2:9e`) in `arp -a` after `nmap -sn 192.168.1.0/24`. Without WiFi
+settings in the image, the Pi needs Ethernet.
+
 ## 3. Configure
 
 The easiest way is the setup screen:
@@ -341,6 +422,7 @@ The files are plain files:
 
 ```sh
 make           # list all targets
+make setup     # install Go, xz, Docker and Raspberry Pi Imager (Homebrew or apt)
 make test      # unit tests + an end-to-end test against a fake Graph server
 make check     # gofmt check, vet and tests, as CI runs them
 make dist      # all release binaries + SHA256SUMS in bin/

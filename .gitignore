@@ -1,5 +1,10 @@
 # Build output
 /bin/
+# Raspberry Pi image downloads (make image)
+/.cache/
+# Personal image settings (WiFi password, auth keys)
+/pi-image/env
+/pi-image/ssh
 # Local test target
 /backup/
 /tmp/
