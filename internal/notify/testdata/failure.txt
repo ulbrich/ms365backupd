@@ -1,0 +1,24 @@
+[ms365backupd] Backup FAILED on ms365backup
+
+The Microsoft 365 backup did not complete successfully.
+
+Status:       failed
+Error:        2 items failed <will retry>
+Trigger:      disk-connected
+Started:      Tue, 10 Nov 2026 04:00:00 UTC
+Duration:     1h0m0s
+Attempts:     3 (all failed)
+Account:      admin@contoso.onmicrosoft.com
+Disk:         08be704b6bc03b2087bfc7e050ad6123 (700.0 GiB free of 931.0 GiB)
+Last success: never
+
+Errors (first 2):
+  - sharepoint/Site/Docs/a & b.pdf: 503 Service Unavailable
+  - onedrive/x.docx: hash mismatch
+
+Work done before the failure:
+  service          new  updated  deleted    moved  skipped   errors   download
+  sharepoint      3398        0        0        0        4        2    5.5 GiB
+  TOTAL           3398        0        0        0        4        2    5.5 GiB
+
+Check the logs with `journalctl -u ms365backupd@$USER` or run `ms365backupd tui`.

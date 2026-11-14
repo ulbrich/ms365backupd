@@ -24,13 +24,14 @@ func HumanBytes(n uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-func host() string {
+// host is a variable so tests get a fixed name.
+var host = func() string {
 	h, _ := os.Hostname()
 	return h
 }
 
 // FailureMessage formats an alert for a failed (or partial) backup.
-func FailureMessage(r *status.RunResult, attempts int, lastSuccess *time.Time) (string, string) {
+func FailureMessage(r *status.RunResult, attempts int, lastSuccess *time.Time) Message {
 	subj := fmt.Sprintf("[ms365backupd] Backup %s on %s", strings.ToUpper(r.Status), host())
 	var b strings.Builder
 	fmt.Fprintf(&b, "The Microsoft 365 backup did not complete successfully.\n\n")
@@ -62,11 +63,54 @@ func FailureMessage(r *status.RunResult, attempts int, lastSuccess *time.Time) (
 	fmt.Fprintf(&b, "\nWork done before the failure:\n")
 	writeCounters(&b, r.Services, r.Totals)
 	fmt.Fprintf(&b, "\nCheck the logs with `journalctl -u ms365backupd@$USER` or run `ms365backupd tui`.\n")
-	return subj, b.String()
+	return Message{Subject: subj, Text: b.String(), HTML: failureHTML(r, attempts, lastSuccess)}
+}
+
+func failureHTML(r *status.RunResult, attempts int, lastSuccess *time.Time) string {
+	d := htmlDoc{
+		Title:    "Backup did not complete",
+		Subtitle: host() + " · " + r.Started.Format("Mon Jan 2 2006, 15:04 MST"),
+		Badge:    strings.ToUpper(r.Status),
+		Tone:     toneBad,
+	}
+	if r.Status == status.StatusPartial {
+		d.Tone = toneWarn
+	}
+	if r.Error != "" {
+		d.Badge += ": " + r.Error
+	}
+	det := []kv{
+		{K: "Trigger", V: r.Trigger},
+		{K: "Started", V: r.Started.Format(time.RFC1123)},
+		{K: "Duration", V: r.Duration().Round(time.Second).String()},
+	}
+	if attempts > 1 {
+		det = append(det, kv{K: "Attempts", V: fmt.Sprintf("%d (all failed)", attempts)})
+	}
+	if r.Account != "" {
+		det = append(det, kv{K: "Account", V: r.Account})
+	}
+	if r.DiskID != "" {
+		det = append(det, kv{K: "Disk", V: fmt.Sprintf("%s free of %s", HumanBytes(r.DiskFree), HumanBytes(r.DiskTotal))},
+			kv{K: "Disk id", V: r.DiskID, Mono: true})
+	}
+	if lastSuccess != nil {
+		det = append(det, kv{K: "Last success", V: fmt.Sprintf("%s (%s ago)", lastSuccess.Format(time.RFC1123), time.Since(*lastSuccess).Round(time.Minute))})
+	} else {
+		det = append(det, kv{K: "Last success", V: "never", Warn: true})
+	}
+	d.Sections = append(d.Sections, htmlSection{Heading: "Details", KV: det})
+	if len(r.ErrorSamples) > 0 {
+		d.Sections = append(d.Sections, htmlSection{Heading: fmt.Sprintf("Errors (first %d)", len(r.ErrorSamples)), List: r.ErrorSamples})
+	}
+	d.Sections = append(d.Sections, htmlSection{Heading: "Work done before the failure", Table: countersTable(r.Services, r.Totals)})
+	d.Footer = []htmlPart{{Text: "Check the logs with "}, {Text: "journalctl -u ms365backupd -e", Code: true},
+		{Text: " or run "}, {Text: "ms365backupd tui", Code: true}, {Text: "."}}
+	return renderHTML(d)
 }
 
 // WeeklyMessage formats the weekly statistics.
-func WeeklyMessage(runs []status.RunResult, from, to time.Time, disk status.DiskState, dataSize uint64, files int64) (string, string) {
+func WeeklyMessage(runs []status.RunResult, from, to time.Time, disk status.DiskState, dataSize uint64, files int64) Message {
 	var ok, partial, failed int
 	var tot status.Counters
 	per := map[string]status.Counters{}
@@ -131,7 +175,90 @@ func WeeklyMessage(runs []status.RunResult, from, to time.Time, disk status.Disk
 			}
 		}
 	}
-	return subj, b.String()
+
+	// HTML version, same content.
+	d := htmlDoc{
+		Title:    "Weekly backup report",
+		Subtitle: host() + " · " + from.Format("Mon Jan 2") + " – " + to.Format("Mon Jan 2 2006"),
+		Tone:     toneOK,
+		Badge:    fmt.Sprintf("OK: %d of %d runs successful", ok, len(runs)),
+	}
+	switch state {
+	case "ATTENTION":
+		d.Tone = toneWarn
+		d.Badge = fmt.Sprintf("ATTENTION: %d partial, %d failed of %d runs", partial, failed, len(runs))
+	case "NO SUCCESSFUL BACKUP":
+		d.Tone = toneBad
+		d.Badge = "NO SUCCESSFUL BACKUP this week"
+	}
+	runKV := []kv{{K: "Runs", V: fmt.Sprintf("%d (%d successful, %d partial, %d failed)", len(runs), ok, partial, failed)}}
+	if len(runs) > 0 {
+		runKV = append(runKV, kv{K: "Total runtime", V: dur.Round(time.Second).String()})
+	}
+	if lastOK != nil {
+		runKV = append(runKV, kv{K: "Last success", V: lastOK.Finished.Format(time.RFC1123)})
+	} else {
+		runKV = append(runKV, kv{K: "Last success", V: "none this week!", Warn: true})
+	}
+	d.Sections = append(d.Sections, htmlSection{Heading: "Runs", KV: runKV})
+	diskKV := []kv{{K: "Path", V: disk.Path, Mono: true}}
+	if disk.Present {
+		diskKV = append(diskKV,
+			kv{K: "Free", V: fmt.Sprintf("%s of %s (%.0f%% used)", HumanBytes(disk.Free), HumanBytes(disk.Total), usedPct(disk))})
+		if dataSize > 0 {
+			diskKV = append(diskKV, kv{K: "Backup data", V: fmt.Sprintf("%s in %d files", HumanBytes(dataSize), files)})
+		}
+		diskKV = append(diskKV, kv{K: "Disk id", V: disk.DiskID, Mono: true})
+	} else {
+		diskKV = append(diskKV, kv{K: "Status", V: "NOT CONNECTED: " + disk.Reason, Warn: true})
+	}
+	d.Sections = append(d.Sections, htmlSection{Heading: "Backup disk", KV: diskKV},
+		htmlSection{Heading: "Changes this week", Table: countersTable(per, tot)})
+	if failed+partial > 0 {
+		t := &htmlTable{Head: []string{"When", "Status", "Error"}}
+		for _, r := range runs {
+			if r.Status != status.StatusSuccess {
+				t.Rows = append(t.Rows, []string{r.Started.Format("Mon 02 15:04"), r.Status, r.Error})
+			}
+		}
+		d.Sections = append(d.Sections, htmlSection{Heading: "Problems", Table: t})
+	}
+	return Message{Subject: subj, Text: b.String(), HTML: renderHTML(d)}
+}
+
+// countersTable is the HTML counterpart of writeCounters.
+func countersTable(per map[string]status.Counters, tot status.Counters) *htmlTable {
+	keys := make([]string, 0, len(per))
+	for k := range per {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	t := &htmlTable{Head: []string{"Service", "New", "Updated", "Deleted", "Moved", "Skipped", "Errors", "Download"}, Right: 1, Total: true}
+	row := func(name string, c status.Counters) {
+		t.Rows = append(t.Rows, []string{name, fmt.Sprint(c.New), fmt.Sprint(c.Updated), fmt.Sprint(c.Deleted), fmt.Sprint(c.Moved),
+			fmt.Sprint(c.Skipped), fmt.Sprint(c.Errors), HumanBytes(uint64(c.Bytes))})
+	}
+	for _, k := range keys {
+		row(k, per[k])
+	}
+	row("Total", tot)
+	return t
+}
+
+// TestMessage is the message of `ms365backupd test-email`.
+func TestMessage() Message {
+	h := host()
+	return Message{
+		Subject: "[ms365backupd] Test notification from " + h,
+		Text:    "This is a test message from ms365backupd.\n\nFailure alerts and weekly reports will be delivered like this one.\n",
+		HTML: renderHTML(htmlDoc{
+			Title:    "Test notification",
+			Subtitle: h,
+			Badge:    "OK: e-mail delivery works",
+			Tone:     toneOK,
+			Intro:    "This is a test message from ms365backupd. Failure alerts and weekly reports will be delivered like this one.",
+		}),
+	}
 }
 
 func usedPct(d status.DiskState) float64 {

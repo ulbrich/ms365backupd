@@ -1,0 +1,24 @@
+[ms365backupd] Weekly report Nov 9 – Nov 16 (ATTENTION)
+
+Microsoft 365 backup – weekly report for ms365backup
+Period: Mon Nov 9 2026 – Mon Nov 16 2026
+
+Runs:          3 (1 successful, 1 partial, 1 failed)
+Total runtime: 1h41m0s
+Last success:  Mon, 09 Nov 2026 02:40:00 UTC
+
+Backup disk:   /mnt/backup
+  disk id:     08be704b6bc03b2087bfc7e050ad6123
+  free:        700.0 GiB of 931.0 GiB (25% used)
+  backup data: 123.0 GiB in 45678 files
+
+Changes this week:
+  service          new  updated  deleted    moved  skipped   errors   download
+  mail             140        0        2        1        0        0    8.7 MiB
+  onedrive          12        3        1        0        0        0   49.6 MiB
+  sharepoint      3398        0        0        0        4        2    5.5 GiB
+  TOTAL           3550        3        3        1        4        2    5.6 GiB
+
+Problems:
+  Tue 10 04:00  partial 2 items failed <will retry>
+  Wed 11 04:00  failed  target is not a mount point (disk not connected?)

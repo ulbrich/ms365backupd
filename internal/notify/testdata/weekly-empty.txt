@@ -1,0 +1,14 @@
+[ms365backupd] Weekly report Nov 9 – Nov 16 (NO SUCCESSFUL BACKUP)
+
+Microsoft 365 backup – weekly report for ms365backup
+Period: Mon Nov 9 2026 – Mon Nov 16 2026
+
+Runs:          0 (0 successful, 0 partial, 0 failed)
+Last success:  none this week!
+
+Backup disk:   /mnt/backup
+  NOT CONNECTED: target is not a mount point
+
+Changes this week:
+  service          new  updated  deleted    moved  skipped   errors   download
+  TOTAL              0        0        0        0        0        0        0 B

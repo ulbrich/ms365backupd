@@ -23,9 +23,16 @@ import (
 	"github.com/ulbrich/ms365backupd/internal/graph"
 )
 
-// Sender delivers a plain-text message to the configured recipients.
+// Message is a notification with a plain-text body and an optional HTML version of it.
+type Message struct {
+	Subject string
+	Text    string
+	HTML    string // empty: text only
+}
+
+// Sender delivers a message to the configured recipients.
 type Sender interface {
-	Send(ctx context.Context, subject, body string) error
+	Send(ctx context.Context, m Message) error
 }
 
 // GraphFactory lazily provides a Graph client (needed only for via=graph).
@@ -44,7 +51,7 @@ func New(cfg *config.Config, gf GraphFactory) Sender {
 
 type smtpSender struct{ cfg *config.Config }
 
-func (s *smtpSender) Send(ctx context.Context, subject, body string) error {
+func (s *smtpSender) Send(ctx context.Context, m Message) error {
 	e := s.cfg.Email
 	port := e.SMTPPort
 	mode := strings.ToLower(e.TLS)
@@ -113,7 +120,7 @@ func (s *smtpSender) Send(ctx context.Context, subject, body string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := w.Write(buildMessage(e.From, e.To, subject, body)); err != nil {
+	if _, err := w.Write(buildMessage(e.From, e.To, m)); err != nil {
 		return err
 	}
 	if err := w.Close(); err != nil {
@@ -122,10 +129,13 @@ func (s *smtpSender) Send(ctx context.Context, subject, body string) error {
 	return c.Quit()
 }
 
-func buildMessage(from string, to []string, subject, body string) []byte {
+// buildMessage writes the RFC 5322 message: text/plain, or multipart/alternative with
+// the text part first and the HTML part last (the preferred one).
+func buildMessage(from string, to []string, m Message) []byte {
 	var b bytes.Buffer
 	var id [12]byte
 	_, _ = rand.Read(id[:])
+	subject := m.Subject
 	domain := "localhost"
 	if i := strings.LastIndex(from, "@"); i >= 0 {
 		domain = strings.Trim(from[i+1:], "> ")
@@ -135,11 +145,24 @@ func buildMessage(from string, to []string, subject, body string) []byte {
 	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	fmt.Fprintf(&b, "Message-ID: <%s@%s>\r\n", hex.EncodeToString(id[:]), domain)
-	b.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n")
-	b.WriteString("Auto-Submitted: auto-generated\r\nX-Mailer: ms365backupd\r\n\r\n")
-	qp := quotedprintable.NewWriter(&b)
-	_, _ = qp.Write([]byte(strings.ReplaceAll(body, "\n", "\r\n")))
-	_ = qp.Close()
+	b.WriteString("MIME-Version: 1.0\r\nAuto-Submitted: auto-generated\r\nX-Mailer: ms365backupd\r\n")
+	part := func(ctype, body string) {
+		fmt.Fprintf(&b, "Content-Type: %s; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n", ctype)
+		qp := quotedprintable.NewWriter(&b)
+		_, _ = qp.Write([]byte(strings.ReplaceAll(body, "\n", "\r\n")))
+		_ = qp.Close()
+	}
+	if m.HTML == "" {
+		part("text/plain", m.Text)
+		return b.Bytes()
+	}
+	boundary := "ms365backupd-" + hex.EncodeToString(id[:])
+	fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", boundary)
+	fmt.Fprintf(&b, "--%s\r\n", boundary)
+	part("text/plain", m.Text)
+	fmt.Fprintf(&b, "\r\n--%s\r\n", boundary)
+	part("text/html", m.HTML)
+	fmt.Fprintf(&b, "\r\n--%s--\r\n", boundary)
 	return b.Bytes()
 }
 
@@ -148,7 +171,9 @@ type graphSender struct {
 	gf  GraphFactory
 }
 
-func (s *graphSender) Send(ctx context.Context, subject, body string) error {
+// Send posts the message via Graph sendMail. Graph takes one body: the HTML version if
+// there is one (Exchange adds a text part for recipients that need it), else the text.
+func (s *graphSender) Send(ctx context.Context, m Message) error {
 	g, err := s.gf(ctx)
 	if err != nil {
 		return err
@@ -164,10 +189,14 @@ func (s *graphSender) Send(ctx context.Context, subject, body string) error {
 		a.EmailAddress.Address = t
 		to = append(to, a)
 	}
+	body := map[string]string{"contentType": "Text", "content": m.Text}
+	if m.HTML != "" {
+		body = map[string]string{"contentType": "HTML", "content": m.HTML}
+	}
 	msg := map[string]any{
 		"message": map[string]any{
-			"subject":      subject,
-			"body":         map[string]string{"contentType": "Text", "content": body},
+			"subject":      m.Subject,
+			"body":         body,
 			"toRecipients": to,
 		},
 		"saveToSentItems": false,

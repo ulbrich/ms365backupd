@@ -360,7 +360,7 @@ func newHistoryCmd() *cobra.Command {
 }
 
 func newReportCmd() *cobra.Command {
-	var print bool
+	var print, asHTML bool
 	cmd := &cobra.Command{
 		Use:   "report",
 		Short: "Send (or --print) the weekly statistics report now",
@@ -369,6 +369,7 @@ func newReportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			print = print || asHTML
 			if !print {
 				err := daemon.NewClient(cfg.EffectiveStateDir()).Report()
 				if err == nil {
@@ -384,22 +385,27 @@ func newReportCmd() *cobra.Command {
 			from := to.AddDate(0, 0, -7)
 			runs, _ := history.Open(cfg.EffectiveStateDir()).Since(from)
 			size, files := daemon.DataSize(info)
-			subj, body := notify.WeeklyMessage(runs, from, to, status.DiskState{Path: info.Path, Present: info.Present, Reason: info.Reason,
+			msg := notify.WeeklyMessage(runs, from, to, status.DiskState{Path: info.Path, Present: info.Present, Reason: info.Reason,
 				DiskID: info.DiskID, Free: info.Free, Total: info.Total}, size, files)
-			if print {
-				fmt.Println("Subject:", subj)
-				fmt.Println()
-				fmt.Println(body)
+			if asHTML {
+				fmt.Print(msg.HTML)
 				return nil
 			}
-			return sendMail(cfg, subj, body)
+			if print {
+				fmt.Println("Subject:", msg.Subject)
+				fmt.Println()
+				fmt.Println(msg.Text)
+				return nil
+			}
+			return sendMail(cfg, msg)
 		},
 	}
 	cmd.Flags().BoolVar(&print, "print", false, "print the report instead of mailing it")
+	cmd.Flags().BoolVar(&asHTML, "html", false, "print the HTML version of the report (e.g. > report.html)")
 	return cmd
 }
 
-func sendMail(cfg *config.Config, subj, body string) error {
+func sendMail(cfg *config.Config, msg notify.Message) error {
 	if err := cfg.Validate(false); err != nil {
 		return err
 	}
@@ -409,7 +415,7 @@ func sendMail(cfg *config.Config, subj, body string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := s.Send(ctx, subj, body); err != nil {
+	if err := s.Send(ctx, msg); err != nil {
 		return err
 	}
 	fmt.Printf("Sent to %s via %s.\n", strings.Join(cfg.Email.To, ", "), cfg.EmailVia())
@@ -425,9 +431,7 @@ func newTestEmailCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			h, _ := os.Hostname()
-			return sendMail(cfg, "[ms365backupd] Test notification from "+h,
-				"This is a test message from ms365backupd.\n\nFailure alerts and weekly reports will be delivered like this one.\n")
+			return sendMail(cfg, notify.TestMessage())
 		},
 	}
 }

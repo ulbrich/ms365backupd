@@ -366,6 +366,10 @@ Entries can be combined; a site found twice is backed up once. Exclude a single 
 **Email:** `via: "smtp"` uses any SMTP server. Credentials are only sent over TLS. `via: "graph"`
 sends through the backed-up mailbox and needs the `Mail.Send` permission. If no `email.to`
 is set, no mail is sent. Set `weekly_report_day` to `"off"` to disable the weekly report.
+Alerts and reports are sent as plain text plus a simply formatted HTML version (SMTP:
+`multipart/alternative`, so text-only clients show the text; Graph: the HTML version). Preview
+the weekly report with `ms365backupd report --print` (text) or
+`ms365backupd report --html > report.html` (HTML).
 
 **Additional mailboxes** (`mailboxes`) are backed up to `mailboxes/<name>/`, independently
 of `services.mail`. Manage them with `ms365backupd mailbox …` (writes the config file right away) or in the
@@ -434,7 +438,7 @@ ms365backupd tui               # dashboard: b=backup f=full resync c=cancel m=ma
 ms365backupd backup [--full] [-s mail,sharepoint,mailboxes]
 ms365backupd mailbox list|add|remove|login|logout|test|enable|disable   # additional mailboxes
 ms365backupd history -n 30
-ms365backupd report --print    # preview the weekly report
+ms365backupd report --print    # preview the weekly report (--html: the HTML version)
 ms365backupd completion zsh|bash|fish   # or: make install-completions
 ```
 

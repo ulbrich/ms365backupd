@@ -346,10 +346,10 @@ func (d *Daemon) notifyFailure(ctx context.Context, res *status.RunResult, attem
 		t := r.Finished
 		lastOK = &t
 	}
-	subj, body := notify.FailureMessage(res, attempts, lastOK)
+	msg := notify.FailureMessage(res, attempts, lastOK)
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
 	defer cancel()
-	if err := d.sender.Send(sctx, subj, body); err != nil {
+	if err := d.sender.Send(sctx, msg); err != nil {
 		d.log.Error("cannot send failure mail", "err", err)
 		return
 	}
@@ -415,10 +415,10 @@ func (d *Daemon) doSendWeekly(ctx context.Context, info disk.Info, force bool) e
 	from := to.AddDate(0, 0, -7)
 	runs, _ := d.hist.Since(from)
 	size, files := DataSize(info)
-	subj, body := notify.WeeklyMessage(runs, from, to, toDiskState(info), size, files)
+	msg := notify.WeeklyMessage(runs, from, to, toDiskState(info), size, files)
 	sctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
-	if err := d.sender.Send(sctx, subj, body); err != nil {
+	if err := d.sender.Send(sctx, msg); err != nil {
 		d.log.Error("cannot send weekly report", "err", err)
 		return err
 	}
